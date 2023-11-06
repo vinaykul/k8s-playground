@@ -1,0 +1,2509 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="614" onload="init(evt)" viewBox="0 0 1200 614" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+
+		// use GET parameters to restore a flamegraphs state.
+		var params = get_params();
+		if (params.x && params.y)
+			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+                if (params.s) search(params.s);
+	}
+
+	// event listeners
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom(true);
+			zoom(target);
+			if (!document.querySelector('.parent')) {
+				// we have basically done a clearzoom so clear the url
+				var params = get_params();
+				if (params.x) delete params.x;
+				if (params.y) delete params.y;
+				history.replaceState(null, null, parse_params(params));
+				unzoombtn.classList.add("hide");
+				return;
+			}
+
+			// set parameters for zoom state
+			var el = target.querySelector("rect");
+			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+				var params = get_params()
+				params.x = el.attributes._orig_x.value;
+				params.y = el.attributes.y.value;
+				history.replaceState(null, null, parse_params(params));
+			}
+		}
+		else if (e.target.id == "unzoom") clearzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+		else if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function get_params() {
+		var params = {};
+		var paramsarr = window.location.search.substr(1).split('&');
+		for (var i = 0; i < paramsarr.length; ++i) {
+			var tmp = paramsarr[i].split("=");
+			if (!tmp[0] || !tmp[1]) continue;
+			params[tmp[0]]  = decodeURIComponent(tmp[1]);
+		}
+		return params;
+	}
+	function parse_params(params) {
+		var uri = "?";
+		for (var key in params) {
+			uri += key + '=' + encodeURIComponent(params[key]) + '&';
+		}
+		if (uri.slice(-1) == "&")
+			uri = uri.substring(0, uri.length - 1);
+		if (uri == '?')
+			uri = window.location.href.split('?')[0];
+		return uri;
+	}
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		var sl = t.getSubStringLength(0, txt.length);
+		// check if only whitespace or if we can fit the entire string into width w
+		if (/^ *$/.test(txt) || sl < w)
+			return;
+
+		// this isn't perfect, but gives a good starting point
+		// and avoids calling getSubStringLength too often
+		var start = Math.floor((w/sl) * txt.length);
+		for (var x = start; x > 0; x = x-2) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom(dont_update_text) {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			if(!dont_update_text) update_text(el[i]);
+		}
+		search();
+	}
+	function clearzoom() {
+		unzoom();
+
+		// remove zoom state
+		var params = get_params();
+		if (params.x) delete params.x;
+		if (params.y) delete params.y;
+		history.replaceState(null, null, parse_params(params));
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+		var params = get_params();
+		delete params.s;
+		history.replaceState(null, null, parse_params(params));
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) search(term);
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (term) currentSearchTerm = term;
+
+		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+		var params = get_params();
+		params.s = currentSearchTerm;
+		history.replaceState(null, null, parse_params(params));
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="614.0" fill="url(#background)"  />
+<text id="title" x="600.00" y="24" >Flame Graph</text>
+<text id="details" x="10.00" y="597" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="597" > </text>
+<g id="frames">
+<g >
+<title>runtime.entersyscall (1 samples, 1.02%)</title><rect x="190.6" y="389" width="12.1" height="15.0" fill="rgb(249,203,48)" rx="2" ry="2" />
+<text  x="193.61" y="399.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/kuberuntime.instrumentedRuntimeService.ListPodSandbox (1 samples, 1.02%)</title><rect x="720.4" y="405" width="12.0" height="15.0" fill="rgb(245,188,45)" rx="2" ry="2" />
+<text  x="723.41" y="415.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/logs.(*containerLogManager).rotateLogs (1 samples, 1.02%)</title><rect x="503.7" y="469" width="12.0" height="15.0" fill="rgb(252,220,52)" rx="2" ry="2" />
+<text  x="506.67" y="479.5" ></text>
+</g>
+<g >
+<title>github.com/opencontainers/runc/libcontainer/cgroups/fs2.statMemory (2 samples, 2.04%)</title><rect x="94.3" y="453" width="24.1" height="15.0" fill="rgb(234,135,32)" rx="2" ry="2" />
+<text  x="97.29" y="463.5" >g..</text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/container.(*runtimeCache).updateCache (2 samples, 2.04%)</title><rect x="708.4" y="469" width="24.0" height="15.0" fill="rgb(225,92,22)" rx="2" ry="2" />
+<text  x="711.37" y="479.5" >k..</text>
+</g>
+<g >
+<title>google.golang.org/grpc.(*csAttempt).recvMsg (1 samples, 1.02%)</title><rect x="780.6" y="325" width="12.1" height="15.0" fill="rgb(218,63,15)" rx="2" ry="2" />
+<text  x="783.61" y="335.5" ></text>
+</g>
+<g >
+<title>k8s.io/klog/v2.VDepth (1 samples, 1.02%)</title><rect x="744.5" y="469" width="12.0" height="15.0" fill="rgb(222,79,19)" rx="2" ry="2" />
+<text  x="747.49" y="479.5" ></text>
+</g>
+<g >
+<title>github.com/google/cadvisor/container/common.getSpecInternal (1 samples, 1.02%)</title><rect x="804.7" y="325" width="12.0" height="15.0" fill="rgb(238,156,37)" rx="2" ry="2" />
+<text  x="807.69" y="335.5" ></text>
+</g>
+<g >
+<title>os.Open (2 samples, 2.04%)</title><rect x="94.3" y="437" width="24.1" height="15.0" fill="rgb(209,21,5)" rx="2" ry="2" />
+<text  x="97.29" y="447.5" >o..</text>
+</g>
+<g >
+<title>syscall.RawSyscall (1 samples, 1.02%)</title><rect x="10.0" y="469" width="12.0" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="13.00" y="479.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc.(*clientStream).RecvMsg (1 samples, 1.02%)</title><rect x="780.6" y="373" width="12.1" height="15.0" fill="rgb(222,82,19)" rx="2" ry="2" />
+<text  x="783.61" y="383.5" ></text>
+</g>
+<g >
+<title>runtime.writeHeapBits.flush (1 samples, 1.02%)</title><rect x="323.1" y="453" width="12.0" height="15.0" fill="rgb(205,1,0)" rx="2" ry="2" />
+<text  x="326.06" y="463.5" ></text>
+</g>
+<g >
+<title>github.com/google/cadvisor/manager.(*manager).globalHousekeeping (1 samples, 1.02%)</title><rect x="142.4" y="549" width="12.1" height="15.0" fill="rgb(249,203,48)" rx="2" ry="2" />
+<text  x="145.45" y="559.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc.recv (1 samples, 1.02%)</title><rect x="780.6" y="309" width="12.1" height="15.0" fill="rgb(246,191,45)" rx="2" ry="2" />
+<text  x="783.61" y="319.5" ></text>
+</g>
+<g >
+<title>internal/poll.runtime_pollOpen (1 samples, 1.02%)</title><rect x="130.4" y="341" width="12.0" height="15.0" fill="rgb(231,121,29)" rx="2" ry="2" />
+<text  x="133.41" y="351.5" ></text>
+</g>
+<g >
+<title>runtime.morestack (1 samples, 1.02%)</title><rect x="1178.0" y="549" width="12.0" height="15.0" fill="rgb(219,67,16)" rx="2" ry="2" />
+<text  x="1180.96" y="559.5" ></text>
+</g>
+<g >
+<title>runtime/internal/syscall.Syscall6 (2 samples, 2.04%)</title><rect x="58.2" y="389" width="24.0" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="61.16" y="399.5" >r..</text>
+</g>
+<g >
+<title>runtime.unlockWithRank (1 samples, 1.02%)</title><rect x="1178.0" y="501" width="12.0" height="15.0" fill="rgb(247,197,47)" rx="2" ry="2" />
+<text  x="1180.96" y="511.5" ></text>
+</g>
+<g >
+<title>github.com/google/cadvisor/container/common.ListDirectories (1 samples, 1.02%)</title><rect x="142.4" y="485" width="12.1" height="15.0" fill="rgb(229,111,26)" rx="2" ry="2" />
+<text  x="145.45" y="495.5" ></text>
+</g>
+<g >
+<title>cmpbody (1 samples, 1.02%)</title><rect x="696.3" y="373" width="12.1" height="15.0" fill="rgb(218,62,14)" rx="2" ry="2" />
+<text  x="699.33" y="383.5" ></text>
+</g>
+<g >
+<title>os.Open (1 samples, 1.02%)</title><rect x="22.0" y="453" width="12.1" height="15.0" fill="rgb(209,21,5)" rx="2" ry="2" />
+<text  x="25.04" y="463.5" ></text>
+</g>
+<g >
+<title>github.com/google/cadvisor/container/raw.(*rawContainerHandler).GetSpec (1 samples, 1.02%)</title><rect x="768.6" y="389" width="12.0" height="15.0" fill="rgb(239,157,37)" rx="2" ry="2" />
+<text  x="771.57" y="399.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc.invoke (1 samples, 1.02%)</title><rect x="491.6" y="357" width="12.1" height="15.0" fill="rgb(225,93,22)" rx="2" ry="2" />
+<text  x="494.63" y="367.5" ></text>
+</g>
+<g >
+<title>runtime.mallocgc (1 samples, 1.02%)</title><rect x="792.7" y="357" width="12.0" height="15.0" fill="rgb(241,169,40)" rx="2" ry="2" />
+<text  x="795.65" y="367.5" ></text>
+</g>
+<g >
+<title>k8s.io/cri-api/pkg/apis/runtime/v1.(*runtimeServiceClient).ListPodSandbox (1 samples, 1.02%)</title><rect x="720.4" y="357" width="12.0" height="15.0" fill="rgb(225,96,23)" rx="2" ry="2" />
+<text  x="723.41" y="367.5" ></text>
+</g>
+<g >
+<title>runtime.unlockWithRank (1 samples, 1.02%)</title><rect x="840.8" y="389" width="12.1" height="15.0" fill="rgb(247,197,47)" rx="2" ry="2" />
+<text  x="843.82" y="399.5" ></text>
+</g>
+<g >
+<title>k8s.io/klog/v2.(*loggingT).output (1 samples, 1.02%)</title><rect x="756.5" y="453" width="12.1" height="15.0" fill="rgb(229,112,26)" rx="2" ry="2" />
+<text  x="759.53" y="463.5" ></text>
+</g>
+<g >
+<title>runtime.checkTimersNoP (1 samples, 1.02%)</title><rect x="925.1" y="485" width="12.0" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="928.10" y="495.5" ></text>
+</g>
+<g >
+<title>github.com/google/cadvisor/container/libcontainer.processStatsFromProcs (5 samples, 5.10%)</title><rect x="22.0" y="469" width="60.2" height="15.0" fill="rgb(254,225,53)" rx="2" ry="2" />
+<text  x="25.04" y="479.5" >github..</text>
+</g>
+<g >
+<title>syscall.write (1 samples, 1.02%)</title><rect x="756.5" y="405" width="12.1" height="15.0" fill="rgb(252,217,51)" rx="2" ry="2" />
+<text  x="759.53" y="415.5" ></text>
+</g>
+<g >
+<title>k8s.io/apimachinery/pkg/util/wait.Until (10 samples, 10.20%)</title><rect x="479.6" y="549" width="120.4" height="15.0" fill="rgb(214,43,10)" rx="2" ry="2" />
+<text  x="482.59" y="559.5" >k8s.io/apimachi..</text>
+</g>
+<g >
+<title>runtime.notewakeup (2 samples, 2.04%)</title><rect x="889.0" y="309" width="24.1" height="15.0" fill="rgb(231,122,29)" rx="2" ry="2" />
+<text  x="891.98" y="319.5" >r..</text>
+</g>
+<g >
+<title>syscall.Syscall6 (1 samples, 1.02%)</title><rect x="82.2" y="373" width="12.1" height="15.0" fill="rgb(216,52,12)" rx="2" ry="2" />
+<text  x="85.24" y="383.5" ></text>
+</g>
+<g >
+<title>internal/poll.(*FD).Fstat.func1 (1 samples, 1.02%)</title><rect x="768.6" y="325" width="12.0" height="15.0" fill="rgb(232,128,30)" rx="2" ry="2" />
+<text  x="771.57" y="335.5" ></text>
+</g>
+<g >
+<title>syscall.RawSyscall6 (1 samples, 1.02%)</title><rect x="804.7" y="197" width="12.0" height="15.0" fill="rgb(241,167,40)" rx="2" ry="2" />
+<text  x="807.69" y="207.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet.(*Kubelet).ImageFsStats (1 samples, 1.02%)</title><rect x="780.6" y="501" width="12.1" height="15.0" fill="rgb(241,169,40)" rx="2" ry="2" />
+<text  x="783.61" y="511.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet.(*Kubelet).Run (13 samples, 13.27%)</title><rect x="600.0" y="549" width="156.5" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="603.00" y="559.5" >k8s.io/kubernetes/pk..</text>
+</g>
+<g >
+<title>net.(*conn).Read (10 samples, 10.20%)</title><rect x="178.6" y="469" width="120.4" height="15.0" fill="rgb(229,113,27)" rx="2" ry="2" />
+<text  x="181.57" y="479.5" >net.(*conn).Read</text>
+</g>
+<g >
+<title>os.newFile (1 samples, 1.02%)</title><rect x="130.4" y="389" width="12.0" height="15.0" fill="rgb(244,179,43)" rx="2" ry="2" />
+<text  x="133.41" y="399.5" ></text>
+</g>
+<g >
+<title>runtime.entersyscall_sysmon (1 samples, 1.02%)</title><rect x="190.6" y="341" width="12.1" height="15.0" fill="rgb(236,144,34)" rx="2" ry="2" />
+<text  x="193.61" y="351.5" ></text>
+</g>
+<g >
+<title>os.Open (1 samples, 1.02%)</title><rect x="130.4" y="437" width="12.0" height="15.0" fill="rgb(209,21,5)" rx="2" ry="2" />
+<text  x="133.41" y="447.5" ></text>
+</g>
+<g >
+<title>os.readIntLE (1 samples, 1.02%)</title><rect x="684.3" y="405" width="12.0" height="15.0" fill="rgb(226,100,23)" rx="2" ry="2" />
+<text  x="687.29" y="415.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/stats.getCadvisorContainerInfo (2 samples, 2.04%)</title><rect x="792.7" y="437" width="24.0" height="15.0" fill="rgb(232,124,29)" rx="2" ry="2" />
+<text  x="795.65" y="447.5" >k..</text>
+</g>
+<g >
+<title>runtime.futexwakeup (1 samples, 1.02%)</title><rect x="311.0" y="357" width="12.1" height="15.0" fill="rgb(219,66,15)" rx="2" ry="2" />
+<text  x="314.02" y="367.5" ></text>
+</g>
+<g >
+<title>golang.org/x/sys/unix.openat2 (1 samples, 1.02%)</title><rect x="118.4" y="357" width="12.0" height="15.0" fill="rgb(241,169,40)" rx="2" ry="2" />
+<text  x="121.37" y="367.5" ></text>
+</g>
+<g >
+<title>runtime.futex (1 samples, 1.02%)</title><rect x="311.0" y="341" width="12.1" height="15.0" fill="rgb(237,150,35)" rx="2" ry="2" />
+<text  x="314.02" y="351.5" ></text>
+</g>
+<g >
+<title>github.com/google/cadvisor/manager.(*containerData).housekeeping (10 samples, 10.20%)</title><rect x="22.0" y="549" width="120.4" height="15.0" fill="rgb(239,158,37)" rx="2" ry="2" />
+<text  x="25.04" y="559.5" >github.com/goog..</text>
+</g>
+<g >
+<title>runtime.execute (1 samples, 1.02%)</title><rect x="876.9" y="501" width="12.1" height="15.0" fill="rgb(252,216,51)" rx="2" ry="2" />
+<text  x="879.94" y="511.5" ></text>
+</g>
+<g >
+<title>runtime/internal/syscall.Syscall6 (3 samples, 3.06%)</title><rect x="997.3" y="453" width="36.2" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="1000.35" y="463.5" >run..</text>
+</g>
+<g >
+<title>google.golang.org/grpc.(*clientStream).withRetry (1 samples, 1.02%)</title><rect x="503.7" y="341" width="12.0" height="15.0" fill="rgb(244,182,43)" rx="2" ry="2" />
+<text  x="506.67" y="351.5" ></text>
+</g>
+<g >
+<title>k8s.io/cri-api/pkg/apis/runtime/v1.(*runtimeServiceClient).ListContainers (1 samples, 1.02%)</title><rect x="503.7" y="421" width="12.0" height="15.0" fill="rgb(243,176,42)" rx="2" ry="2" />
+<text  x="506.67" y="431.5" ></text>
+</g>
+<g >
+<title>runtime.runOneTimer (3 samples, 3.06%)</title><rect x="889.0" y="453" width="36.1" height="15.0" fill="rgb(239,157,37)" rx="2" ry="2" />
+<text  x="891.98" y="463.5" >run..</text>
+</g>
+<g >
+<title>runtime.wakep (1 samples, 1.02%)</title><rect x="311.0" y="405" width="12.1" height="15.0" fill="rgb(216,54,13)" rx="2" ry="2" />
+<text  x="314.02" y="415.5" ></text>
+</g>
+<g >
+<title>runtime/internal/syscall.EpollCtl (1 samples, 1.02%)</title><rect x="22.0" y="341" width="12.1" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="25.04" y="351.5" ></text>
+</g>
+<g >
+<title>os.openFileNolog (1 samples, 1.02%)</title><rect x="612.0" y="421" width="12.1" height="15.0" fill="rgb(221,74,17)" rx="2" ry="2" />
+<text  x="615.04" y="431.5" ></text>
+</g>
+<g >
+<title>sort.insertionSort_func (1 samples, 1.02%)</title><rect x="696.3" y="405" width="12.1" height="15.0" fill="rgb(227,102,24)" rx="2" ry="2" />
+<text  x="699.33" y="415.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcentral).cacheSpan (1 samples, 1.02%)</title><rect x="46.1" y="373" width="12.1" height="15.0" fill="rgb(244,179,42)" rx="2" ry="2" />
+<text  x="49.12" y="383.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc/internal/transport.(*recvBuffer).put (1 samples, 1.02%)</title><rect x="299.0" y="517" width="12.0" height="15.0" fill="rgb(225,96,23)" rx="2" ry="2" />
+<text  x="301.98" y="527.5" ></text>
+</g>
+<g >
+<title>runtime.mallocgc (1 samples, 1.02%)</title><rect x="479.6" y="261" width="12.0" height="15.0" fill="rgb(241,169,40)" rx="2" ry="2" />
+<text  x="482.59" y="271.5" ></text>
+</g>
+<g >
+<title>k8s.io/cri-api/pkg/apis/runtime/v1.(*runtimeServiceClient).ListContainers (1 samples, 1.02%)</title><rect x="527.8" y="389" width="12.0" height="15.0" fill="rgb(243,176,42)" rx="2" ry="2" />
+<text  x="530.76" y="399.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/kuberuntime.(*kubeGenericRuntimeManager).GetPods (6 samples, 6.12%)</title><rect x="515.7" y="469" width="72.3" height="15.0" fill="rgb(223,86,20)" rx="2" ry="2" />
+<text  x="518.71" y="479.5" >k8s.io/k..</text>
+</g>
+<g >
+<title>runtime.notewakeup (8 samples, 8.16%)</title><rect x="1081.6" y="453" width="96.4" height="15.0" fill="rgb(231,122,29)" rx="2" ry="2" />
+<text  x="1084.63" y="463.5" >runtime.not..</text>
+</g>
+<g >
+<title>runtime/internal/syscall.Syscall6 (1 samples, 1.02%)</title><rect x="852.9" y="453" width="12.0" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="855.86" y="463.5" ></text>
+</g>
+<g >
+<title>syscall.Readlink (2 samples, 2.04%)</title><rect x="58.2" y="453" width="24.0" height="15.0" fill="rgb(254,229,54)" rx="2" ry="2" />
+<text  x="61.16" y="463.5" >s..</text>
+</g>
+<g >
+<title>syscall.RawSyscall6 (2 samples, 2.04%)</title><rect x="58.2" y="405" width="24.0" height="15.0" fill="rgb(241,167,40)" rx="2" ry="2" />
+<text  x="61.16" y="415.5" >s..</text>
+</g>
+<g >
+<title>runtime.stackcacherefill (1 samples, 1.02%)</title><rect x="828.8" y="389" width="12.0" height="15.0" fill="rgb(228,107,25)" rx="2" ry="2" />
+<text  x="831.78" y="399.5" ></text>
+</g>
+<g >
+<title>runtime.futex (1 samples, 1.02%)</title><rect x="840.8" y="341" width="12.1" height="15.0" fill="rgb(237,150,35)" rx="2" ry="2" />
+<text  x="843.82" y="351.5" ></text>
+</g>
+<g >
+<title>runtime.notewakeup (1 samples, 1.02%)</title><rect x="756.5" y="309" width="12.1" height="15.0" fill="rgb(231,122,29)" rx="2" ry="2" />
+<text  x="759.53" y="319.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet.(*Kubelet).ListPodStatsAndUpdateCPUNanoCoreUsage (2 samples, 2.04%)</title><rect x="792.7" y="501" width="24.0" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="795.65" y="511.5" >k..</text>
+</g>
+<g >
+<title>google.golang.org/grpc.(*clientStream).RecvMsg.func1 (1 samples, 1.02%)</title><rect x="503.7" y="325" width="12.0" height="15.0" fill="rgb(244,180,43)" rx="2" ry="2" />
+<text  x="506.67" y="335.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc/internal/transport.(*loopyWriter).headerHandler (2 samples, 2.04%)</title><rect x="455.5" y="501" width="24.1" height="15.0" fill="rgb(211,30,7)" rx="2" ry="2" />
+<text  x="458.51" y="511.5" >g..</text>
+</g>
+<g >
+<title>runtime.netpoll (1 samples, 1.02%)</title><rect x="852.9" y="485" width="12.0" height="15.0" fill="rgb(231,119,28)" rx="2" ry="2" />
+<text  x="855.86" y="495.5" ></text>
+</g>
+<g >
+<title>runtime.growslice (1 samples, 1.02%)</title><rect x="648.2" y="421" width="12.0" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="651.16" y="431.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc.invoke (1 samples, 1.02%)</title><rect x="527.8" y="341" width="12.0" height="15.0" fill="rgb(225,93,22)" rx="2" ry="2" />
+<text  x="530.76" y="351.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc/internal/transport.(*http2Client).newStream.func1 (1 samples, 1.02%)</title><rect x="780.6" y="245" width="12.1" height="15.0" fill="rgb(230,117,28)" rx="2" ry="2" />
+<text  x="783.61" y="255.5" ></text>
+</g>
+<g >
+<title>github.com/opencontainers/runc/libcontainer/cgroups/fscommon.GetCgroupParamUint (1 samples, 1.02%)</title><rect x="118.4" y="437" width="12.0" height="15.0" fill="rgb(233,128,30)" rx="2" ry="2" />
+<text  x="121.37" y="447.5" ></text>
+</g>
+<g >
+<title>internal/poll.(*pollDesc).init (1 samples, 1.02%)</title><rect x="130.4" y="357" width="12.0" height="15.0" fill="rgb(246,191,45)" rx="2" ry="2" />
+<text  x="133.41" y="367.5" ></text>
+</g>
+<g >
+<title>runtime/internal/syscall.Syscall6 (1 samples, 1.02%)</title><rect x="130.4" y="309" width="12.0" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="133.41" y="319.5" ></text>
+</g>
+<g >
+<title>runtime.selectnbsend (2 samples, 2.04%)</title><rect x="551.8" y="197" width="24.1" height="15.0" fill="rgb(249,204,48)" rx="2" ry="2" />
+<text  x="554.84" y="207.5" >r..</text>
+</g>
+<g >
+<title>os.ReadFile (1 samples, 1.02%)</title><rect x="804.7" y="277" width="12.0" height="15.0" fill="rgb(221,74,17)" rx="2" ry="2" />
+<text  x="807.69" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.slicebytetostring (1 samples, 1.02%)</title><rect x="660.2" y="421" width="12.0" height="15.0" fill="rgb(252,219,52)" rx="2" ry="2" />
+<text  x="663.20" y="431.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc/internal/transport.newHTTP2Client.func6 (12 samples, 12.24%)</title><rect x="335.1" y="549" width="144.5" height="15.0" fill="rgb(221,77,18)" rx="2" ry="2" />
+<text  x="338.10" y="559.5" >google.golang.org/..</text>
+</g>
+<g >
+<title>runtime.send.goready.func1 (1 samples, 1.02%)</title><rect x="311.0" y="437" width="12.1" height="15.0" fill="rgb(226,97,23)" rx="2" ry="2" />
+<text  x="314.02" y="447.5" ></text>
+</g>
+<g >
+<title>runtime.reentersyscall (1 samples, 1.02%)</title><rect x="756.5" y="357" width="12.1" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="759.53" y="367.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/cri/remote.(*remoteRuntimeService).listContainersV1 (1 samples, 1.02%)</title><rect x="503.7" y="437" width="12.0" height="15.0" fill="rgb(216,52,12)" rx="2" ry="2" />
+<text  x="506.67" y="447.5" ></text>
+</g>
+<g >
+<title>syscall.Syscall6 (1 samples, 1.02%)</title><rect x="118.4" y="341" width="12.0" height="15.0" fill="rgb(216,52,12)" rx="2" ry="2" />
+<text  x="121.37" y="351.5" ></text>
+</g>
+<g >
+<title>runtime.usleep (1 samples, 1.02%)</title><rect x="1069.6" y="437" width="12.0" height="15.0" fill="rgb(254,228,54)" rx="2" ry="2" />
+<text  x="1072.59" y="447.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc.recv (1 samples, 1.02%)</title><rect x="527.8" y="261" width="12.0" height="15.0" fill="rgb(246,191,45)" rx="2" ry="2" />
+<text  x="530.76" y="271.5" ></text>
+</g>
+<g >
+<title>github.com/opencontainers/runc/libcontainer/cgroups.OpenFile (1 samples, 1.02%)</title><rect x="118.4" y="389" width="12.0" height="15.0" fill="rgb(242,173,41)" rx="2" ry="2" />
+<text  x="121.37" y="399.5" ></text>
+</g>
+<g >
+<title>runtime.startm (8 samples, 8.16%)</title><rect x="1081.6" y="469" width="96.4" height="15.0" fill="rgb(220,71,17)" rx="2" ry="2" />
+<text  x="1084.63" y="479.5" >runtime.sta..</text>
+</g>
+<g >
+<title>runtime.systemstack (1 samples, 1.02%)</title><rect x="190.6" y="357" width="12.1" height="15.0" fill="rgb(206,6,1)" rx="2" ry="2" />
+<text  x="193.61" y="367.5" ></text>
+</g>
+<g >
+<title>runtime.findRunnable (1 samples, 1.02%)</title><rect x="852.9" y="501" width="12.0" height="15.0" fill="rgb(219,64,15)" rx="2" ry="2" />
+<text  x="855.86" y="511.5" ></text>
+</g>
+<g >
+<title>github.com/google/cadvisor/machine.GetMachineSwapCapacity (1 samples, 1.02%)</title><rect x="768.6" y="373" width="12.0" height="15.0" fill="rgb(246,188,45)" rx="2" ry="2" />
+<text  x="771.57" y="383.5" ></text>
+</g>
+<g >
+<title>sync.(*poolDequeue).pushHead (1 samples, 1.02%)</title><rect x="600.0" y="421" width="12.0" height="15.0" fill="rgb(222,79,19)" rx="2" ry="2" />
+<text  x="603.00" y="431.5" ></text>
+</g>
+<g >
+<title>runtime.resetspinning (8 samples, 8.16%)</title><rect x="1081.6" y="501" width="96.4" height="15.0" fill="rgb(225,95,22)" rx="2" ry="2" />
+<text  x="1084.63" y="511.5" >runtime.res..</text>
+</g>
+<g >
+<title>runtime.startm (1 samples, 1.02%)</title><rect x="864.9" y="469" width="12.0" height="15.0" fill="rgb(220,71,17)" rx="2" ry="2" />
+<text  x="867.90" y="479.5" ></text>
+</g>
+<g >
+<title>runtime.chansend (2 samples, 2.04%)</title><rect x="889.0" y="405" width="24.1" height="15.0" fill="rgb(228,109,26)" rx="2" ry="2" />
+<text  x="891.98" y="415.5" >r..</text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/kuberuntime.(*kubeGenericRuntimeManager).getKubeletSandboxes (1 samples, 1.02%)</title><rect x="720.4" y="421" width="12.0" height="15.0" fill="rgb(224,89,21)" rx="2" ry="2" />
+<text  x="723.41" y="431.5" ></text>
+</g>
+<g >
+<title>runtime.park_m (25 samples, 25.51%)</title><rect x="876.9" y="533" width="301.1" height="15.0" fill="rgb(233,132,31)" rx="2" ry="2" />
+<text  x="879.94" y="543.5" >runtime.park_m</text>
+</g>
+<g >
+<title>go.opentelemetry.io/otel/trace.WithSpanKind (1 samples, 1.02%)</title><rect x="479.6" y="293" width="12.0" height="15.0" fill="rgb(209,18,4)" rx="2" ry="2" />
+<text  x="482.59" y="303.5" ></text>
+</g>
+<g >
+<title>runtime.goready (2 samples, 2.04%)</title><rect x="889.0" y="389" width="24.1" height="15.0" fill="rgb(253,224,53)" rx="2" ry="2" />
+<text  x="891.98" y="399.5" >r..</text>
+</g>
+<g >
+<title>runtime.futexwakeup (1 samples, 1.02%)</title><rect x="1178.0" y="469" width="12.0" height="15.0" fill="rgb(219,66,15)" rx="2" ry="2" />
+<text  x="1180.96" y="479.5" ></text>
+</g>
+<g >
+<title>os.OpenFile (1 samples, 1.02%)</title><rect x="130.4" y="421" width="12.0" height="15.0" fill="rgb(228,110,26)" rx="2" ry="2" />
+<text  x="133.41" y="431.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/kuberuntime.(*kubeGenericRuntimeManager).getKubeletSandboxes (4 samples, 4.08%)</title><rect x="539.8" y="453" width="48.2" height="15.0" fill="rgb(224,89,21)" rx="2" ry="2" />
+<text  x="542.80" y="463.5" >k8s...</text>
+</g>
+<g >
+<title>google.golang.org/grpc.(*csAttempt).recvMsg (1 samples, 1.02%)</title><rect x="720.4" y="245" width="12.0" height="15.0" fill="rgb(218,63,15)" rx="2" ry="2" />
+<text  x="723.41" y="255.5" ></text>
+</g>
+<g >
+<title>github.com/google/cadvisor/container/raw.(*rawContainerHandler).GetStats (10 samples, 10.20%)</title><rect x="22.0" y="501" width="120.4" height="15.0" fill="rgb(236,144,34)" rx="2" ry="2" />
+<text  x="25.04" y="511.5" >github.com/goog..</text>
+</g>
+<g >
+<title>google.golang.org/grpc.(*clientStream).RecvMsg (1 samples, 1.02%)</title><rect x="503.7" y="357" width="12.0" height="15.0" fill="rgb(222,82,19)" rx="2" ry="2" />
+<text  x="506.67" y="367.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/container.(*runtimeCache).ForceUpdateIfOlder (2 samples, 2.04%)</title><rect x="708.4" y="485" width="24.0" height="15.0" fill="rgb(234,133,31)" rx="2" ry="2" />
+<text  x="711.37" y="495.5" >k..</text>
+</g>
+<g >
+<title>google.golang.org/grpc.newClientStream (3 samples, 3.06%)</title><rect x="551.8" y="325" width="36.2" height="15.0" fill="rgb(229,111,26)" rx="2" ry="2" />
+<text  x="554.84" y="335.5" >goo..</text>
+</g>
+<g >
+<title>google.golang.org/grpc.(*clientStream).RecvMsg (1 samples, 1.02%)</title><rect x="539.8" y="325" width="12.0" height="15.0" fill="rgb(222,82,19)" rx="2" ry="2" />
+<text  x="542.80" y="335.5" ></text>
+</g>
+<g >
+<title>runtime/internal/syscall.EpollCtl (1 samples, 1.02%)</title><rect x="612.0" y="341" width="12.1" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="615.04" y="351.5" ></text>
+</g>
+<g >
+<title>runtime.stealWork (3 samples, 3.06%)</title><rect x="1045.5" y="485" width="36.1" height="15.0" fill="rgb(253,224,53)" rx="2" ry="2" />
+<text  x="1048.51" y="495.5" >run..</text>
+</g>
+<g >
+<title>os.(*File).ReadDir (5 samples, 5.10%)</title><rect x="636.1" y="453" width="60.2" height="15.0" fill="rgb(225,93,22)" rx="2" ry="2" />
+<text  x="639.12" y="463.5" >os.(*F..</text>
+</g>
+<g >
+<title>runtime.futexwakeup (1 samples, 1.02%)</title><rect x="190.6" y="309" width="12.1" height="15.0" fill="rgb(219,66,15)" rx="2" ry="2" />
+<text  x="193.61" y="319.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/stats.(*Provider).GetCgroupStats (1 samples, 1.02%)</title><rect x="768.6" y="485" width="12.0" height="15.0" fill="rgb(230,117,28)" rx="2" ry="2" />
+<text  x="771.57" y="495.5" ></text>
+</g>
+<g >
+<title>runtime/internal/syscall.EpollCtl (2 samples, 2.04%)</title><rect x="94.3" y="325" width="24.1" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="97.29" y="335.5" >r..</text>
+</g>
+<g >
+<title>runtime.ifaceeq (1 samples, 1.02%)</title><rect x="178.6" y="421" width="12.0" height="15.0" fill="rgb(241,166,39)" rx="2" ry="2" />
+<text  x="181.57" y="431.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc.invoke (1 samples, 1.02%)</title><rect x="503.7" y="373" width="12.0" height="15.0" fill="rgb(225,93,22)" rx="2" ry="2" />
+<text  x="506.67" y="383.5" ></text>
+</g>
+<g >
+<title>github.com/google/cadvisor/fs.(*RealFsInfo).GetFsInfoForPath (1 samples, 1.02%)</title><rect x="130.4" y="453" width="12.0" height="15.0" fill="rgb(242,174,41)" rx="2" ry="2" />
+<text  x="133.41" y="463.5" ></text>
+</g>
+<g >
+<title>runtime.notewakeup (1 samples, 1.02%)</title><rect x="864.9" y="453" width="12.0" height="15.0" fill="rgb(231,122,29)" rx="2" ry="2" />
+<text  x="867.90" y="463.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/cri/remote.(*remoteRuntimeService).ListContainers (1 samples, 1.02%)</title><rect x="527.8" y="421" width="12.0" height="15.0" fill="rgb(245,184,44)" rx="2" ry="2" />
+<text  x="530.76" y="431.5" ></text>
+</g>
+<g >
+<title>golang.org/x/sys/unix.Openat2 (1 samples, 1.02%)</title><rect x="118.4" y="373" width="12.0" height="15.0" fill="rgb(248,200,47)" rx="2" ry="2" />
+<text  x="121.37" y="383.5" ></text>
+</g>
+<g >
+<title>path.Join (1 samples, 1.02%)</title><rect x="46.1" y="453" width="12.1" height="15.0" fill="rgb(211,28,6)" rx="2" ry="2" />
+<text  x="49.12" y="463.5" ></text>
+</g>
+<g >
+<title>k8s.io/klog/v2.(*loggingT).printDepth (1 samples, 1.02%)</title><rect x="756.5" y="485" width="12.1" height="15.0" fill="rgb(245,187,44)" rx="2" ry="2" />
+<text  x="759.53" y="495.5" ></text>
+</g>
+<g >
+<title>google.golang.org/protobuf/internal/impl.Export.ProtoMessageV2Of (1 samples, 1.02%)</title><rect x="527.8" y="197" width="12.0" height="15.0" fill="rgb(229,111,26)" rx="2" ry="2" />
+<text  x="530.76" y="207.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/config.filterInvalidPods (1 samples, 1.02%)</title><rect x="588.0" y="421" width="12.0" height="15.0" fill="rgb(216,52,12)" rx="2" ry="2" />
+<text  x="590.96" y="431.5" ></text>
+</g>
+<g >
+<title>github.com/google/cadvisor/container/common.listDirectories (1 samples, 1.02%)</title><rect x="142.4" y="469" width="12.1" height="15.0" fill="rgb(222,80,19)" rx="2" ry="2" />
+<text  x="145.45" y="479.5" ></text>
+</g>
+<g >
+<title>runtime.lockWithRank (1 samples, 1.02%)</title><rect x="913.1" y="405" width="12.0" height="15.0" fill="rgb(214,42,10)" rx="2" ry="2" />
+<text  x="916.06" y="415.5" ></text>
+</g>
+<g >
+<title>os.OpenFile (1 samples, 1.02%)</title><rect x="22.0" y="437" width="12.1" height="15.0" fill="rgb(228,110,26)" rx="2" ry="2" />
+<text  x="25.04" y="447.5" ></text>
+</g>
+<g >
+<title>runtime.notesleep (5 samples, 5.10%)</title><rect x="937.1" y="469" width="60.2" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="940.14" y="479.5" >runtim..</text>
+</g>
+<g >
+<title>golang.org/x/net/http2.parsePingFrame (1 samples, 1.02%)</title><rect x="166.5" y="517" width="12.1" height="15.0" fill="rgb(227,103,24)" rx="2" ry="2" />
+<text  x="169.53" y="527.5" ></text>
+</g>
+<g >
+<title>runtime/internal/syscall.Syscall6 (1 samples, 1.02%)</title><rect x="82.2" y="341" width="12.1" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="85.24" y="351.5" ></text>
+</g>
+<g >
+<title>runtime.netpoll (3 samples, 3.06%)</title><rect x="997.3" y="485" width="36.2" height="15.0" fill="rgb(231,119,28)" rx="2" ry="2" />
+<text  x="1000.35" y="495.5" >run..</text>
+</g>
+<g >
+<title>fmt.Sprintf (1 samples, 1.02%)</title><rect x="154.5" y="485" width="12.0" height="15.0" fill="rgb(210,26,6)" rx="2" ry="2" />
+<text  x="157.49" y="495.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc/internal/transport.(*bufWriter).Flush (10 samples, 10.20%)</title><rect x="335.1" y="517" width="120.4" height="15.0" fill="rgb(250,211,50)" rx="2" ry="2" />
+<text  x="338.10" y="527.5" >google.golang.o..</text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/cri/remote.(*remoteRuntimeService).listContainersV1 (1 samples, 1.02%)</title><rect x="708.4" y="373" width="12.0" height="15.0" fill="rgb(216,52,12)" rx="2" ry="2" />
+<text  x="711.37" y="383.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/eviction.(*managerImpl).Start.func2 (5 samples, 5.10%)</title><rect x="756.5" y="549" width="60.2" height="15.0" fill="rgb(243,176,42)" rx="2" ry="2" />
+<text  x="759.53" y="559.5" >k8s.io..</text>
+</g>
+<g >
+<title>github.com/google/cadvisor/manager.(*manager).getContainersDiff (1 samples, 1.02%)</title><rect x="142.4" y="517" width="12.1" height="15.0" fill="rgb(234,134,32)" rx="2" ry="2" />
+<text  x="145.45" y="527.5" ></text>
+</g>
+<g >
+<title>runtime.shrinkstack (2 samples, 2.04%)</title><rect x="828.8" y="437" width="24.1" height="15.0" fill="rgb(248,200,47)" rx="2" ry="2" />
+<text  x="831.78" y="447.5" >r..</text>
+</g>
+<g >
+<title>sort.Sort (1 samples, 1.02%)</title><rect x="732.4" y="453" width="12.1" height="15.0" fill="rgb(231,122,29)" rx="2" ry="2" />
+<text  x="735.45" y="463.5" ></text>
+</g>
+<g >
+<title>runtime.futexsleep (5 samples, 5.10%)</title><rect x="937.1" y="453" width="60.2" height="15.0" fill="rgb(218,63,15)" rx="2" ry="2" />
+<text  x="940.14" y="463.5" >runtim..</text>
+</g>
+<g >
+<title>runtime.pMask.read (1 samples, 1.02%)</title><rect x="1033.5" y="485" width="12.0" height="15.0" fill="rgb(239,156,37)" rx="2" ry="2" />
+<text  x="1036.47" y="495.5" ></text>
+</g>
+<g >
+<title>github.com/google/cadvisor/utils/sysinfo.GetHugePagesInfo (1 samples, 1.02%)</title><rect x="154.5" y="517" width="12.0" height="15.0" fill="rgb(208,17,4)" rx="2" ry="2" />
+<text  x="157.49" y="527.5" ></text>
+</g>
+<g >
+<title>runtime.checkTimers (3 samples, 3.06%)</title><rect x="889.0" y="485" width="36.1" height="15.0" fill="rgb(228,105,25)" rx="2" ry="2" />
+<text  x="891.98" y="495.5" >run..</text>
+</g>
+<g >
+<title>runtime.newobject (1 samples, 1.02%)</title><rect x="323.1" y="501" width="12.0" height="15.0" fill="rgb(221,75,18)" rx="2" ry="2" />
+<text  x="326.06" y="511.5" ></text>
+</g>
+<g >
+<title>runtime.schedule (2 samples, 2.04%)</title><rect x="852.9" y="517" width="24.0" height="15.0" fill="rgb(220,72,17)" rx="2" ry="2" />
+<text  x="855.86" y="527.5" >r..</text>
+</g>
+<g >
+<title>runtime/internal/syscall.Syscall6 (9 samples, 9.18%)</title><rect x="347.1" y="389" width="108.4" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="350.14" y="399.5" >runtime/inter..</text>
+</g>
+<g >
+<title>runtime.mPark (5 samples, 5.10%)</title><rect x="937.1" y="485" width="60.2" height="15.0" fill="rgb(254,226,54)" rx="2" ry="2" />
+<text  x="940.14" y="495.5" >runtim..</text>
+</g>
+<g >
+<title>syscall.RawSyscall6 (1 samples, 1.02%)</title><rect x="10.0" y="453" width="12.0" height="15.0" fill="rgb(241,167,40)" rx="2" ry="2" />
+<text  x="13.00" y="463.5" ></text>
+</g>
+<g >
+<title>runtime.memequal64 (1 samples, 1.02%)</title><rect x="178.6" y="405" width="12.0" height="15.0" fill="rgb(221,75,18)" rx="2" ry="2" />
+<text  x="181.57" y="415.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc.newClientStreamWithParams (2 samples, 2.04%)</title><rect x="551.8" y="293" width="24.1" height="15.0" fill="rgb(214,42,10)" rx="2" ry="2" />
+<text  x="554.84" y="303.5" >g..</text>
+</g>
+<g >
+<title>syscall.Syscall (9 samples, 9.18%)</title><rect x="190.6" y="405" width="108.4" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="193.61" y="415.5" >syscall.Syscall</text>
+</g>
+<g >
+<title>github.com/google/cadvisor/manager.(*containerData).updateSpec (1 samples, 1.02%)</title><rect x="804.7" y="373" width="12.0" height="15.0" fill="rgb(248,197,47)" rx="2" ry="2" />
+<text  x="807.69" y="383.5" ></text>
+</g>
+<g >
+<title>runtime.gcBgMarkWorker.func2 (2 samples, 2.04%)</title><rect x="828.8" y="517" width="24.1" height="15.0" fill="rgb(250,209,50)" rx="2" ry="2" />
+<text  x="831.78" y="527.5" >r..</text>
+</g>
+<g >
+<title>runtime/internal/syscall.Syscall6 (1 samples, 1.02%)</title><rect x="22.0" y="325" width="12.1" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="25.04" y="335.5" ></text>
+</g>
+<g >
+<title>os.direntNamlen (1 samples, 1.02%)</title><rect x="684.3" y="437" width="12.0" height="15.0" fill="rgb(238,152,36)" rx="2" ry="2" />
+<text  x="687.29" y="447.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc.recvAndDecompress (1 samples, 1.02%)</title><rect x="780.6" y="293" width="12.1" height="15.0" fill="rgb(219,66,15)" rx="2" ry="2" />
+<text  x="783.61" y="303.5" ></text>
+</g>
+<g >
+<title>github.com/google/cadvisor/container/common.readString (1 samples, 1.02%)</title><rect x="804.7" y="293" width="12.0" height="15.0" fill="rgb(225,93,22)" rx="2" ry="2" />
+<text  x="807.69" y="303.5" ></text>
+</g>
+<g >
+<title>runtime.futexwakeup (1 samples, 1.02%)</title><rect x="840.8" y="357" width="12.1" height="15.0" fill="rgb(219,66,15)" rx="2" ry="2" />
+<text  x="843.82" y="367.5" ></text>
+</g>
+<g >
+<title>runtime.(*mheap).alloc (1 samples, 1.02%)</title><rect x="46.1" y="341" width="12.1" height="15.0" fill="rgb(230,117,28)" rx="2" ry="2" />
+<text  x="49.12" y="351.5" ></text>
+</g>
+<g >
+<title>syscall.Syscall (1 samples, 1.02%)</title><rect x="672.2" y="389" width="12.1" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="675.24" y="399.5" ></text>
+</g>
+<g >
+<title>runtime.notewakeup (1 samples, 1.02%)</title><rect x="335.1" y="341" width="12.0" height="15.0" fill="rgb(231,122,29)" rx="2" ry="2" />
+<text  x="338.10" y="351.5" ></text>
+</g>
+<g >
+<title>github.com/google/cadvisor/machine.Info (1 samples, 1.02%)</title><rect x="154.5" y="533" width="12.0" height="15.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="157.49" y="543.5" ></text>
+</g>
+<g >
+<title>syscall.Syscall (1 samples, 1.02%)</title><rect x="804.7" y="213" width="12.0" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="807.69" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.resetspinning (1 samples, 1.02%)</title><rect x="864.9" y="501" width="12.0" height="15.0" fill="rgb(225,95,22)" rx="2" ry="2" />
+<text  x="867.90" y="511.5" ></text>
+</g>
+<g >
+<title>runtime.gcBgMarkWorker (2 samples, 2.04%)</title><rect x="828.8" y="549" width="24.1" height="15.0" fill="rgb(235,140,33)" rx="2" ry="2" />
+<text  x="831.78" y="559.5" >r..</text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/cri/remote.(*remoteRuntimeService).ListContainers (1 samples, 1.02%)</title><rect x="479.6" y="357" width="12.0" height="15.0" fill="rgb(245,184,44)" rx="2" ry="2" />
+<text  x="482.59" y="367.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc.(*ClientConn).Invoke (1 samples, 1.02%)</title><rect x="720.4" y="341" width="12.0" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="723.41" y="351.5" ></text>
+</g>
+<g >
+<title>k8s.io/klog/v2.V (1 samples, 1.02%)</title><rect x="744.5" y="485" width="12.0" height="15.0" fill="rgb(208,17,4)" rx="2" ry="2" />
+<text  x="747.49" y="495.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc/internal/transport.(*itemList).enqueue (1 samples, 1.02%)</title><rect x="323.1" y="517" width="12.0" height="15.0" fill="rgb(228,109,26)" rx="2" ry="2" />
+<text  x="326.06" y="527.5" ></text>
+</g>
+<g >
+<title>golang.org/x/sys/unix.openat2 (1 samples, 1.02%)</title><rect x="82.2" y="389" width="12.1" height="15.0" fill="rgb(241,169,40)" rx="2" ry="2" />
+<text  x="85.24" y="399.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/kuberuntime.instrumentedRuntimeService.ListContainers (1 samples, 1.02%)</title><rect x="479.6" y="373" width="12.0" height="15.0" fill="rgb(213,38,9)" rx="2" ry="2" />
+<text  x="482.59" y="383.5" ></text>
+</g>
+<g >
+<title>k8s.io/apimachinery/pkg/util/wait.JitterUntil (10 samples, 10.20%)</title><rect x="479.6" y="533" width="120.4" height="15.0" fill="rgb(220,72,17)" rx="2" ry="2" />
+<text  x="482.59" y="543.5" >k8s.io/apimachi..</text>
+</g>
+<g >
+<title>internal/poll.(*FD).Init (1 samples, 1.02%)</title><rect x="130.4" y="373" width="12.0" height="15.0" fill="rgb(221,77,18)" rx="2" ry="2" />
+<text  x="133.41" y="383.5" ></text>
+</g>
+<g >
+<title>runtime.selectnbsend (1 samples, 1.02%)</title><rect x="299.0" y="501" width="12.0" height="15.0" fill="rgb(249,204,48)" rx="2" ry="2" />
+<text  x="301.98" y="511.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/cri/remote.(*remoteRuntimeService).listContainersV1 (1 samples, 1.02%)</title><rect x="527.8" y="405" width="12.0" height="15.0" fill="rgb(216,52,12)" rx="2" ry="2" />
+<text  x="530.76" y="415.5" ></text>
+</g>
+<g >
+<title>github.com/google/cadvisor/manager.(*containerData).GetInfo (1 samples, 1.02%)</title><rect x="768.6" y="421" width="12.0" height="15.0" fill="rgb(234,137,32)" rx="2" ry="2" />
+<text  x="771.57" y="431.5" ></text>
+</g>
+<g >
+<title>runtime.mallocgc (1 samples, 1.02%)</title><rect x="648.2" y="405" width="12.0" height="15.0" fill="rgb(241,169,40)" rx="2" ry="2" />
+<text  x="651.16" y="415.5" ></text>
+</g>
+<g >
+<title>k8s.io/apimachinery/pkg/util/wait.JitterUntil (1 samples, 1.02%)</title><rect x="816.7" y="517" width="12.1" height="15.0" fill="rgb(220,72,17)" rx="2" ry="2" />
+<text  x="819.73" y="527.5" ></text>
+</g>
+<g >
+<title>github.com/opencontainers/runc/libcontainer/cgroups/fscommon.GetCgroupParamString (1 samples, 1.02%)</title><rect x="118.4" y="421" width="12.0" height="15.0" fill="rgb(244,180,43)" rx="2" ry="2" />
+<text  x="121.37" y="431.5" ></text>
+</g>
+<g >
+<title>runtime.newobject (1 samples, 1.02%)</title><rect x="491.6" y="261" width="12.1" height="15.0" fill="rgb(221,75,18)" rx="2" ry="2" />
+<text  x="494.63" y="271.5" ></text>
+</g>
+<g >
+<title>github.com/google/cadvisor/container/raw.(*rawContainerHandler).GetSpec (1 samples, 1.02%)</title><rect x="804.7" y="357" width="12.0" height="15.0" fill="rgb(239,157,37)" rx="2" ry="2" />
+<text  x="807.69" y="367.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc.(*ClientConn).Invoke (1 samples, 1.02%)</title><rect x="527.8" y="373" width="12.0" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="530.76" y="383.5" ></text>
+</g>
+<g >
+<title>golang.org/x/net/http2/hpack.(*Encoder).WriteField (2 samples, 2.04%)</title><rect x="455.5" y="453" width="24.1" height="15.0" fill="rgb(251,213,51)" rx="2" ry="2" />
+<text  x="458.51" y="463.5" >g..</text>
+</g>
+<g >
+<title>runtime.wakep (2 samples, 2.04%)</title><rect x="551.8" y="101" width="24.1" height="15.0" fill="rgb(216,54,13)" rx="2" ry="2" />
+<text  x="554.84" y="111.5" >r..</text>
+</g>
+<g >
+<title>internal/poll.(*pollDesc).init (1 samples, 1.02%)</title><rect x="612.0" y="373" width="12.1" height="15.0" fill="rgb(246,191,45)" rx="2" ry="2" />
+<text  x="615.04" y="383.5" ></text>
+</g>
+<g >
+<title>sync.(*Pool).Put (1 samples, 1.02%)</title><rect x="600.0" y="453" width="12.0" height="15.0" fill="rgb(229,112,26)" rx="2" ry="2" />
+<text  x="603.00" y="463.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/stats.(*criStatsProvider).ListPodStatsAndUpdateCPUNanoCoreUsage (2 samples, 2.04%)</title><rect x="792.7" y="485" width="24.0" height="15.0" fill="rgb(216,53,12)" rx="2" ry="2" />
+<text  x="795.65" y="495.5" >k..</text>
+</g>
+<g >
+<title>go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc.UnaryClientInterceptor.func1 (1 samples, 1.02%)</title><rect x="491.6" y="373" width="12.1" height="15.0" fill="rgb(211,28,6)" rx="2" ry="2" />
+<text  x="494.63" y="383.5" ></text>
+</g>
+<g >
+<title>syscall.RawSyscall6 (1 samples, 1.02%)</title><rect x="672.2" y="373" width="12.1" height="15.0" fill="rgb(241,167,40)" rx="2" ry="2" />
+<text  x="675.24" y="383.5" ></text>
+</g>
+<g >
+<title>runtime.mallocgc (1 samples, 1.02%)</title><rect x="660.2" y="405" width="12.0" height="15.0" fill="rgb(241,169,40)" rx="2" ry="2" />
+<text  x="663.20" y="415.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/cri/remote.(*remoteImageService).ImageFsInfo (1 samples, 1.02%)</title><rect x="780.6" y="469" width="12.1" height="15.0" fill="rgb(250,209,50)" rx="2" ry="2" />
+<text  x="783.61" y="479.5" ></text>
+</g>
+<g >
+<title>github.com/google/cadvisor/container/common.readUInt64 (1 samples, 1.02%)</title><rect x="804.7" y="309" width="12.0" height="15.0" fill="rgb(236,143,34)" rx="2" ry="2" />
+<text  x="807.69" y="319.5" ></text>
+</g>
+<g >
+<title>net.(*netFD).Write (10 samples, 10.20%)</title><rect x="335.1" y="469" width="120.4" height="15.0" fill="rgb(229,114,27)" rx="2" ry="2" />
+<text  x="338.10" y="479.5" >net.(*netFD).Wr..</text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/images.(*realImageGCManager).Start.func2 (1 samples, 1.02%)</title><rect x="491.6" y="485" width="12.1" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="494.63" y="495.5" ></text>
+</g>
+<g >
+<title>github.com/google/cadvisor/fs.(*RealFsInfo).GetGlobalFsInfo (1 samples, 1.02%)</title><rect x="130.4" y="469" width="12.0" height="15.0" fill="rgb(232,126,30)" rx="2" ry="2" />
+<text  x="133.41" y="479.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcentral).grow (1 samples, 1.02%)</title><rect x="46.1" y="357" width="12.1" height="15.0" fill="rgb(233,130,31)" rx="2" ry="2" />
+<text  x="49.12" y="367.5" ></text>
+</g>
+<g >
+<title>runtime.ready (1 samples, 1.02%)</title><rect x="311.0" y="421" width="12.1" height="15.0" fill="rgb(236,143,34)" rx="2" ry="2" />
+<text  x="314.02" y="431.5" ></text>
+</g>
+<g >
+<title>net.(*conn).Write (10 samples, 10.20%)</title><rect x="335.1" y="485" width="120.4" height="15.0" fill="rgb(206,4,1)" rx="2" ry="2" />
+<text  x="338.10" y="495.5" >net.(*conn).Write</text>
+</g>
+<g >
+<title>runtime.notewakeup (1 samples, 1.02%)</title><rect x="190.6" y="325" width="12.1" height="15.0" fill="rgb(231,122,29)" rx="2" ry="2" />
+<text  x="193.61" y="335.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc/internal/transport.(*Stream).write (1 samples, 1.02%)</title><rect x="299.0" y="533" width="12.0" height="15.0" fill="rgb(243,178,42)" rx="2" ry="2" />
+<text  x="301.98" y="543.5" ></text>
+</g>
+<g >
+<title>k8s.io/apimachinery/pkg/util/wait.BackoffUntil (10 samples, 10.20%)</title><rect x="479.6" y="517" width="120.4" height="15.0" fill="rgb(245,188,45)" rx="2" ry="2" />
+<text  x="482.59" y="527.5" >k8s.io/apimachi..</text>
+</g>
+<g >
+<title>syscall.Syscall6 (2 samples, 2.04%)</title><rect x="58.2" y="421" width="24.0" height="15.0" fill="rgb(216,52,12)" rx="2" ry="2" />
+<text  x="61.16" y="431.5" >s..</text>
+</g>
+<g >
+<title>syscall.RawSyscall6 (8 samples, 8.16%)</title><rect x="202.7" y="389" width="96.3" height="15.0" fill="rgb(241,167,40)" rx="2" ry="2" />
+<text  x="205.65" y="399.5" >syscall.Raw..</text>
+</g>
+<g >
+<title>github.com/opencontainers/runc/libcontainer/cgroups.ReadFile (1 samples, 1.02%)</title><rect x="118.4" y="405" width="12.0" height="15.0" fill="rgb(234,137,32)" rx="2" ry="2" />
+<text  x="121.37" y="415.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc/internal/transport.(*loopyWriter).run (12 samples, 12.24%)</title><rect x="335.1" y="533" width="144.5" height="15.0" fill="rgb(229,112,26)" rx="2" ry="2" />
+<text  x="338.10" y="543.5" >google.golang.org/..</text>
+</g>
+<g >
+<title>internal/poll.(*FD).Fstat.func1 (1 samples, 1.02%)</title><rect x="804.7" y="245" width="12.0" height="15.0" fill="rgb(232,128,30)" rx="2" ry="2" />
+<text  x="807.69" y="255.5" ></text>
+</g>
+<g >
+<title>google.golang.org/protobuf/internal/impl.(*messageReflectWrapper).Interface (1 samples, 1.02%)</title><rect x="527.8" y="181" width="12.0" height="15.0" fill="rgb(220,72,17)" rx="2" ry="2" />
+<text  x="530.76" y="191.5" ></text>
+</g>
+<g >
+<title>go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc.UnaryClientInterceptor.func1 (1 samples, 1.02%)</title><rect x="527.8" y="357" width="12.0" height="15.0" fill="rgb(211,28,6)" rx="2" ry="2" />
+<text  x="530.76" y="367.5" ></text>
+</g>
+<g >
+<title>k8s.io/cri-api/pkg/apis/runtime/v1.(*runtimeServiceClient).ListPodSandbox (4 samples, 4.08%)</title><rect x="539.8" y="389" width="48.2" height="15.0" fill="rgb(225,96,23)" rx="2" ry="2" />
+<text  x="542.80" y="399.5" >k8s...</text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/kuberuntime.(*kubeGenericRuntimeManager).getKubeletContainers (1 samples, 1.02%)</title><rect x="527.8" y="453" width="12.0" height="15.0" fill="rgb(207,11,2)" rx="2" ry="2" />
+<text  x="530.76" y="463.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/cri/remote.(*remoteRuntimeService).listPodSandboxV1 (4 samples, 4.08%)</title><rect x="539.8" y="405" width="48.2" height="15.0" fill="rgb(248,202,48)" rx="2" ry="2" />
+<text  x="542.80" y="415.5" >k8s...</text>
+</g>
+<g >
+<title>runtime/internal/syscall.EpollCtl (1 samples, 1.02%)</title><rect x="130.4" y="325" width="12.0" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="133.41" y="335.5" ></text>
+</g>
+<g >
+<title>github.com/opencontainers/runc/libcontainer/cgroups/fs2.readCgroup2MapFile (1 samples, 1.02%)</title><rect x="82.2" y="437" width="12.1" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="85.24" y="447.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/cri/remote.(*remoteRuntimeService).listContainersV1 (1 samples, 1.02%)</title><rect x="479.6" y="341" width="12.0" height="15.0" fill="rgb(216,52,12)" rx="2" ry="2" />
+<text  x="482.59" y="351.5" ></text>
+</g>
+<g >
+<title>sync.(*poolChain).pushHead (1 samples, 1.02%)</title><rect x="600.0" y="437" width="12.0" height="15.0" fill="rgb(240,163,38)" rx="2" ry="2" />
+<text  x="603.00" y="447.5" ></text>
+</g>
+<g >
+<title>runtime.wakep (2 samples, 2.04%)</title><rect x="889.0" y="341" width="24.1" height="15.0" fill="rgb(216,54,13)" rx="2" ry="2" />
+<text  x="891.98" y="351.5" >r..</text>
+</g>
+<g >
+<title>syscall.write (10 samples, 10.20%)</title><rect x="335.1" y="437" width="120.4" height="15.0" fill="rgb(252,217,51)" rx="2" ry="2" />
+<text  x="338.10" y="447.5" >syscall.write</text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/kuberuntime.(*kubeGenericRuntimeManager).GarbageCollect (1 samples, 1.02%)</title><rect x="479.6" y="453" width="12.0" height="15.0" fill="rgb(221,74,17)" rx="2" ry="2" />
+<text  x="482.59" y="463.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc.(*clientStream).withRetry (1 samples, 1.02%)</title><rect x="720.4" y="277" width="12.0" height="15.0" fill="rgb(244,182,43)" rx="2" ry="2" />
+<text  x="723.41" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcache).nextFree (1 samples, 1.02%)</title><rect x="46.1" y="405" width="12.1" height="15.0" fill="rgb(222,80,19)" rx="2" ry="2" />
+<text  x="49.12" y="415.5" ></text>
+</g>
+<g >
+<title>runtime.futexwakeup (1 samples, 1.02%)</title><rect x="756.5" y="293" width="12.1" height="15.0" fill="rgb(219,66,15)" rx="2" ry="2" />
+<text  x="759.53" y="303.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/volumemanager/reconciler.(*reconciler).Run (1 samples, 1.02%)</title><rect x="816.7" y="549" width="12.1" height="15.0" fill="rgb(251,211,50)" rx="2" ry="2" />
+<text  x="819.73" y="559.5" ></text>
+</g>
+<g >
+<title>runtime.heapBitsSetType (1 samples, 1.02%)</title><rect x="323.1" y="469" width="12.0" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="326.06" y="479.5" ></text>
+</g>
+<g >
+<title>sort.Slice (1 samples, 1.02%)</title><rect x="696.3" y="453" width="12.1" height="15.0" fill="rgb(216,53,12)" rx="2" ry="2" />
+<text  x="699.33" y="463.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet.(*Kubelet).GetCgroupStats (1 samples, 1.02%)</title><rect x="768.6" y="501" width="12.0" height="15.0" fill="rgb(215,49,11)" rx="2" ry="2" />
+<text  x="771.57" y="511.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc.(*ClientConn).Invoke (1 samples, 1.02%)</title><rect x="479.6" y="309" width="12.0" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="482.59" y="319.5" ></text>
+</g>
+<g >
+<title>runtime.notewakeup (2 samples, 2.04%)</title><rect x="551.8" y="69" width="24.1" height="15.0" fill="rgb(231,122,29)" rx="2" ry="2" />
+<text  x="554.84" y="79.5" >r..</text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/kuberuntime.(*containerGC).GarbageCollect (1 samples, 1.02%)</title><rect x="479.6" y="437" width="12.0" height="15.0" fill="rgb(215,48,11)" rx="2" ry="2" />
+<text  x="482.59" y="447.5" ></text>
+</g>
+<g >
+<title>runtime/internal/syscall.Syscall6 (1 samples, 1.02%)</title><rect x="34.1" y="341" width="12.0" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="37.08" y="351.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/logs.(*containerLogManager).Start.func1 (1 samples, 1.02%)</title><rect x="503.7" y="485" width="12.0" height="15.0" fill="rgb(224,87,20)" rx="2" ry="2" />
+<text  x="506.67" y="495.5" ></text>
+</g>
+<g >
+<title>runtime.goready (2 samples, 2.04%)</title><rect x="551.8" y="165" width="24.1" height="15.0" fill="rgb(253,224,53)" rx="2" ry="2" />
+<text  x="554.84" y="175.5" >r..</text>
+</g>
+<g >
+<title>os.openFileNolog (1 samples, 1.02%)</title><rect x="130.4" y="405" width="12.0" height="15.0" fill="rgb(221,74,17)" rx="2" ry="2" />
+<text  x="133.41" y="415.5" ></text>
+</g>
+<g >
+<title>syscall.ReadDirent (1 samples, 1.02%)</title><rect x="34.1" y="405" width="12.0" height="15.0" fill="rgb(216,52,12)" rx="2" ry="2" />
+<text  x="37.08" y="415.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc/internal/transport.(*Stream).waitOnHeader (1 samples, 1.02%)</title><rect x="503.7" y="293" width="12.0" height="15.0" fill="rgb(206,4,1)" rx="2" ry="2" />
+<text  x="506.67" y="303.5" ></text>
+</g>
+<g >
+<title>k8s.io/klog/v2.(*loggingT).infoS (1 samples, 1.02%)</title><rect x="600.0" y="485" width="12.0" height="15.0" fill="rgb(229,111,26)" rx="2" ry="2" />
+<text  x="603.00" y="495.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/config.(*podStorage).Merge (1 samples, 1.02%)</title><rect x="588.0" y="469" width="12.0" height="15.0" fill="rgb(239,157,37)" rx="2" ry="2" />
+<text  x="590.96" y="479.5" ></text>
+</g>
+<g >
+<title>runtime.systemstack (1 samples, 1.02%)</title><rect x="335.1" y="373" width="12.0" height="15.0" fill="rgb(206,6,1)" rx="2" ry="2" />
+<text  x="338.10" y="383.5" ></text>
+</g>
+<g >
+<title>github.com/google/cadvisor/container/raw.(*rawContainerHandler).ListContainers (1 samples, 1.02%)</title><rect x="142.4" y="501" width="12.1" height="15.0" fill="rgb(232,127,30)" rx="2" ry="2" />
+<text  x="145.45" y="511.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/kuberuntime.(*kubeGenericRuntimeManager).GetPods (2 samples, 2.04%)</title><rect x="708.4" y="437" width="24.0" height="15.0" fill="rgb(223,86,20)" rx="2" ry="2" />
+<text  x="711.37" y="447.5" >k..</text>
+</g>
+<g >
+<title>syscall.readlinkat (2 samples, 2.04%)</title><rect x="58.2" y="437" width="24.0" height="15.0" fill="rgb(222,79,19)" rx="2" ry="2" />
+<text  x="61.16" y="447.5" >s..</text>
+</g>
+<g >
+<title>runtime.memclrNoHeapPointers (1 samples, 1.02%)</title><rect x="636.1" y="373" width="12.1" height="15.0" fill="rgb(252,219,52)" rx="2" ry="2" />
+<text  x="639.12" y="383.5" ></text>
+</g>
+<g >
+<title>syscall.RawSyscall6 (1 samples, 1.02%)</title><rect x="34.1" y="357" width="12.0" height="15.0" fill="rgb(241,167,40)" rx="2" ry="2" />
+<text  x="37.08" y="367.5" ></text>
+</g>
+<g >
+<title>syscall.ReadDirent (1 samples, 1.02%)</title><rect x="142.4" y="421" width="12.1" height="15.0" fill="rgb(216,52,12)" rx="2" ry="2" />
+<text  x="145.45" y="431.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc/encoding/proto.codec.Unmarshal (1 samples, 1.02%)</title><rect x="527.8" y="245" width="12.0" height="15.0" fill="rgb(209,19,4)" rx="2" ry="2" />
+<text  x="530.76" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.reentersyscall (1 samples, 1.02%)</title><rect x="190.6" y="373" width="12.1" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="193.61" y="383.5" ></text>
+</g>
+<g >
+<title>runtime.mallocgc (1 samples, 1.02%)</title><rect x="491.6" y="245" width="12.1" height="15.0" fill="rgb(241,169,40)" rx="2" ry="2" />
+<text  x="494.63" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.entersyscall_sysmon (1 samples, 1.02%)</title><rect x="756.5" y="325" width="12.1" height="15.0" fill="rgb(236,144,34)" rx="2" ry="2" />
+<text  x="759.53" y="335.5" ></text>
+</g>
+<g >
+<title>runtime.runqgrab (1 samples, 1.02%)</title><rect x="1069.6" y="453" width="12.0" height="15.0" fill="rgb(235,138,33)" rx="2" ry="2" />
+<text  x="1072.59" y="463.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet.(*Kubelet).syncLoopIteration (13 samples, 13.27%)</title><rect x="600.0" y="517" width="156.5" height="15.0" fill="rgb(246,191,45)" rx="2" ry="2" />
+<text  x="603.00" y="527.5" >k8s.io/kubernetes/pk..</text>
+</g>
+<g >
+<title>google.golang.org/grpc.invoke (1 samples, 1.02%)</title><rect x="720.4" y="309" width="12.0" height="15.0" fill="rgb(225,93,22)" rx="2" ry="2" />
+<text  x="723.41" y="319.5" ></text>
+</g>
+<g >
+<title>github.com/google/cadvisor/container/common.(*InotifyWatcher).RemoveWatch (1 samples, 1.02%)</title><rect x="10.0" y="517" width="12.0" height="15.0" fill="rgb(248,199,47)" rx="2" ry="2" />
+<text  x="13.00" y="527.5" ></text>
+</g>
+<g >
+<title>github.com/google/cadvisor/manager.(*containerData).GetInfo (1 samples, 1.02%)</title><rect x="804.7" y="389" width="12.0" height="15.0" fill="rgb(234,137,32)" rx="2" ry="2" />
+<text  x="807.69" y="399.5" ></text>
+</g>
+<g >
+<title>k8s.io/apimachinery/pkg/util/wait.BackoffUntil.func1 (1 samples, 1.02%)</title><rect x="816.7" y="485" width="12.1" height="15.0" fill="rgb(217,57,13)" rx="2" ry="2" />
+<text  x="819.73" y="495.5" ></text>
+</g>
+<g >
+<title>os.newFile (1 samples, 1.02%)</title><rect x="22.0" y="405" width="12.1" height="15.0" fill="rgb(244,179,43)" rx="2" ry="2" />
+<text  x="25.04" y="415.5" ></text>
+</g>
+<g >
+<title>k8s.io/apimachinery/pkg/util/sets.List[go.shape.string] (1 samples, 1.02%)</title><rect x="732.4" y="469" width="12.1" height="15.0" fill="rgb(207,13,3)" rx="2" ry="2" />
+<text  x="735.45" y="479.5" ></text>
+</g>
+<g >
+<title>github.com/google/cadvisor/manager.(*containerData).updateStats (10 samples, 10.20%)</title><rect x="22.0" y="517" width="120.4" height="15.0" fill="rgb(245,185,44)" rx="2" ry="2" />
+<text  x="25.04" y="527.5" >github.com/goog..</text>
+</g>
+<g >
+<title>runtime.unlock2 (1 samples, 1.02%)</title><rect x="1178.0" y="485" width="12.0" height="15.0" fill="rgb(244,181,43)" rx="2" ry="2" />
+<text  x="1180.96" y="495.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/pleg.(*GenericPLEG).Relist (6 samples, 6.12%)</title><rect x="515.7" y="485" width="72.3" height="15.0" fill="rgb(253,222,53)" rx="2" ry="2" />
+<text  x="518.71" y="495.5" >k8s.io/k..</text>
+</g>
+<g >
+<title>k8s.io/apimachinery/pkg/util/wait.BackoffUntil (1 samples, 1.02%)</title><rect x="816.7" y="501" width="12.1" height="15.0" fill="rgb(245,188,45)" rx="2" ry="2" />
+<text  x="819.73" y="511.5" ></text>
+</g>
+<g >
+<title>golang.org/x/net/http2/hpack.(*Encoder).searchTable (1 samples, 1.02%)</title><rect x="467.6" y="437" width="12.0" height="15.0" fill="rgb(234,135,32)" rx="2" ry="2" />
+<text  x="470.55" y="447.5" ></text>
+</g>
+<g >
+<title>runtime.futex (1 samples, 1.02%)</title><rect x="335.1" y="309" width="12.0" height="15.0" fill="rgb(237,150,35)" rx="2" ry="2" />
+<text  x="338.10" y="319.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet.(*Kubelet).listPodsFromDisk (1 samples, 1.02%)</title><rect x="612.0" y="469" width="12.1" height="15.0" fill="rgb(209,18,4)" rx="2" ry="2" />
+<text  x="615.04" y="479.5" ></text>
+</g>
+<g >
+<title>runtime.notewakeup (1 samples, 1.02%)</title><rect x="311.0" y="373" width="12.1" height="15.0" fill="rgb(231,122,29)" rx="2" ry="2" />
+<text  x="314.02" y="383.5" ></text>
+</g>
+<g >
+<title>runtime.ready (2 samples, 2.04%)</title><rect x="889.0" y="357" width="24.1" height="15.0" fill="rgb(236,143,34)" rx="2" ry="2" />
+<text  x="891.98" y="367.5" >r..</text>
+</g>
+<g >
+<title>google.golang.org/grpc/internal/transport.(*controlBuffer).executeAndPut (2 samples, 2.04%)</title><rect x="551.8" y="213" width="24.1" height="15.0" fill="rgb(251,216,51)" rx="2" ry="2" />
+<text  x="554.84" y="223.5" >g..</text>
+</g>
+<g >
+<title>github.com/golang/protobuf/proto.Unmarshal (1 samples, 1.02%)</title><rect x="527.8" y="229" width="12.0" height="15.0" fill="rgb(210,27,6)" rx="2" ry="2" />
+<text  x="530.76" y="239.5" ></text>
+</g>
+<g >
+<title>os.(*File).readdir (4 samples, 4.08%)</title><rect x="636.1" y="437" width="48.2" height="15.0" fill="rgb(211,32,7)" rx="2" ry="2" />
+<text  x="639.12" y="447.5" >os.(..</text>
+</g>
+<g >
+<title>google.golang.org/grpc.(*csAttempt).recvMsg (1 samples, 1.02%)</title><rect x="527.8" y="277" width="12.0" height="15.0" fill="rgb(218,63,15)" rx="2" ry="2" />
+<text  x="530.76" y="287.5" ></text>
+</g>
+<g >
+<title>k8s.io/cri-api/pkg/apis/runtime/v1.(*imageServiceClient).ListImages (1 samples, 1.02%)</title><rect x="491.6" y="405" width="12.1" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="494.63" y="415.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc.(*ClientConn).Invoke (1 samples, 1.02%)</title><rect x="491.6" y="389" width="12.1" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="494.63" y="399.5" ></text>
+</g>
+<g >
+<title>syscall.Write (1 samples, 1.02%)</title><rect x="756.5" y="421" width="12.1" height="15.0" fill="rgb(208,18,4)" rx="2" ry="2" />
+<text  x="759.53" y="431.5" ></text>
+</g>
+<g >
+<title>runtime.wakep (8 samples, 8.16%)</title><rect x="1081.6" y="485" width="96.4" height="15.0" fill="rgb(216,54,13)" rx="2" ry="2" />
+<text  x="1084.63" y="495.5" >runtime.wakep</text>
+</g>
+<g >
+<title>internal/poll.runtime_pollOpen (2 samples, 2.04%)</title><rect x="94.3" y="341" width="24.1" height="15.0" fill="rgb(231,121,29)" rx="2" ry="2" />
+<text  x="97.29" y="351.5" >i..</text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/kuberuntime.instrumentedImageManagerService.ListImages (1 samples, 1.02%)</title><rect x="491.6" y="453" width="12.1" height="15.0" fill="rgb(252,217,51)" rx="2" ry="2" />
+<text  x="494.63" y="463.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc.invoke (4 samples, 4.08%)</title><rect x="539.8" y="341" width="48.2" height="15.0" fill="rgb(225,93,22)" rx="2" ry="2" />
+<text  x="542.80" y="351.5" >goog..</text>
+</g>
+<g >
+<title>runtime.newobject (1 samples, 1.02%)</title><rect x="575.9" y="309" width="12.1" height="15.0" fill="rgb(221,75,18)" rx="2" ry="2" />
+<text  x="578.92" y="319.5" ></text>
+</g>
+<g >
+<title>k8s.io/apimachinery/pkg/util/wait.Until (1 samples, 1.02%)</title><rect x="816.7" y="533" width="12.1" height="15.0" fill="rgb(214,43,10)" rx="2" ry="2" />
+<text  x="819.73" y="543.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc/internal/transport.(*Stream).Read (1 samples, 1.02%)</title><rect x="780.6" y="261" width="12.1" height="15.0" fill="rgb(224,88,21)" rx="2" ry="2" />
+<text  x="783.61" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.futex (2 samples, 2.04%)</title><rect x="889.0" y="277" width="24.1" height="15.0" fill="rgb(237,150,35)" rx="2" ry="2" />
+<text  x="891.98" y="287.5" >r..</text>
+</g>
+<g >
+<title>syscall.read (9 samples, 9.18%)</title><rect x="190.6" y="421" width="108.4" height="15.0" fill="rgb(226,96,23)" rx="2" ry="2" />
+<text  x="193.61" y="431.5" >syscall.read</text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet.(*Kubelet).StartGarbageCollection.func1 (1 samples, 1.02%)</title><rect x="479.6" y="485" width="12.0" height="15.0" fill="rgb(243,176,42)" rx="2" ry="2" />
+<text  x="482.59" y="495.5" ></text>
+</g>
+<g >
+<title>runtime/internal/syscall.Syscall6 (1 samples, 1.02%)</title><rect x="804.7" y="181" width="12.0" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="807.69" y="191.5" ></text>
+</g>
+<g >
+<title>runtime.newobject (1 samples, 1.02%)</title><rect x="636.1" y="405" width="12.1" height="15.0" fill="rgb(221,75,18)" rx="2" ry="2" />
+<text  x="639.12" y="415.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc.(*clientStream).withRetry (2 samples, 2.04%)</title><rect x="551.8" y="277" width="24.1" height="15.0" fill="rgb(244,182,43)" rx="2" ry="2" />
+<text  x="554.84" y="287.5" >g..</text>
+</g>
+<g >
+<title>go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc.UnaryClientInterceptor.func1 (4 samples, 4.08%)</title><rect x="539.8" y="357" width="48.2" height="15.0" fill="rgb(211,28,6)" rx="2" ry="2" />
+<text  x="542.80" y="367.5" >go.o..</text>
+</g>
+<g >
+<title>runtime/internal/syscall.EpollWait (1 samples, 1.02%)</title><rect x="852.9" y="469" width="12.0" height="15.0" fill="rgb(233,130,31)" rx="2" ry="2" />
+<text  x="855.86" y="479.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc.(*clientStream).withRetry (1 samples, 1.02%)</title><rect x="527.8" y="309" width="12.0" height="15.0" fill="rgb(244,182,43)" rx="2" ry="2" />
+<text  x="530.76" y="319.5" ></text>
+</g>
+<g >
+<title>go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc.UnaryClientInterceptor.func1 (1 samples, 1.02%)</title><rect x="503.7" y="389" width="12.0" height="15.0" fill="rgb(211,28,6)" rx="2" ry="2" />
+<text  x="506.67" y="399.5" ></text>
+</g>
+<g >
+<title>github.com/opencontainers/runc/libcontainer/cgroups/fs2.(*manager).GetStats (4 samples, 4.08%)</title><rect x="82.2" y="469" width="48.2" height="15.0" fill="rgb(213,37,8)" rx="2" ry="2" />
+<text  x="85.24" y="479.5" >gith..</text>
+</g>
+<g >
+<title>os.(*File).Stat (1 samples, 1.02%)</title><rect x="768.6" y="341" width="12.0" height="15.0" fill="rgb(222,81,19)" rx="2" ry="2" />
+<text  x="771.57" y="351.5" ></text>
+</g>
+<g >
+<title>os.ReadDir (6 samples, 6.12%)</title><rect x="636.1" y="469" width="72.3" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="639.12" y="479.5" >os.ReadDir</text>
+</g>
+<g >
+<title>runtime.selectnbsend (1 samples, 1.02%)</title><rect x="311.0" y="501" width="12.1" height="15.0" fill="rgb(249,204,48)" rx="2" ry="2" />
+<text  x="314.02" y="511.5" ></text>
+</g>
+<g >
+<title>runtime.chansend (1 samples, 1.02%)</title><rect x="311.0" y="485" width="12.1" height="15.0" fill="rgb(228,109,26)" rx="2" ry="2" />
+<text  x="314.02" y="495.5" ></text>
+</g>
+<g >
+<title>runtime.futexwakeup (1 samples, 1.02%)</title><rect x="335.1" y="325" width="12.0" height="15.0" fill="rgb(219,66,15)" rx="2" ry="2" />
+<text  x="338.10" y="335.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc.(*parser).recvMsg (1 samples, 1.02%)</title><rect x="780.6" y="277" width="12.1" height="15.0" fill="rgb(230,118,28)" rx="2" ry="2" />
+<text  x="783.61" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.entersyscall (1 samples, 1.02%)</title><rect x="335.1" y="405" width="12.0" height="15.0" fill="rgb(249,203,48)" rx="2" ry="2" />
+<text  x="338.10" y="415.5" ></text>
+</g>
+<g >
+<title>internal/poll.(*FD).Init (1 samples, 1.02%)</title><rect x="22.0" y="389" width="12.1" height="15.0" fill="rgb(221,77,18)" rx="2" ry="2" />
+<text  x="25.04" y="399.5" ></text>
+</g>
+<g >
+<title>runtime.chansend (2 samples, 2.04%)</title><rect x="551.8" y="181" width="24.1" height="15.0" fill="rgb(228,109,26)" rx="2" ry="2" />
+<text  x="554.84" y="191.5" >r..</text>
+</g>
+<g >
+<title>bufio.(*Reader).Read (10 samples, 10.20%)</title><rect x="178.6" y="485" width="120.4" height="15.0" fill="rgb(233,129,30)" rx="2" ry="2" />
+<text  x="181.57" y="495.5" >bufio.(*Reader)..</text>
+</g>
+<g >
+<title>syscall.Fstat (1 samples, 1.02%)</title><rect x="804.7" y="229" width="12.0" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="807.69" y="239.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/kuberuntime.(*containerGC).evictableContainers (1 samples, 1.02%)</title><rect x="479.6" y="405" width="12.0" height="15.0" fill="rgb(252,218,52)" rx="2" ry="2" />
+<text  x="482.59" y="415.5" ></text>
+</g>
+<g >
+<title>internal/poll.ignoringEINTRIO (1 samples, 1.02%)</title><rect x="178.6" y="437" width="12.0" height="15.0" fill="rgb(227,103,24)" rx="2" ry="2" />
+<text  x="181.57" y="447.5" ></text>
+</g>
+<g >
+<title>runtime.newobject (1 samples, 1.02%)</title><rect x="792.7" y="373" width="12.0" height="15.0" fill="rgb(221,75,18)" rx="2" ry="2" />
+<text  x="795.65" y="383.5" ></text>
+</g>
+<g >
+<title>runtime/internal/syscall.Syscall6 (8 samples, 8.16%)</title><rect x="202.7" y="373" width="96.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="205.65" y="383.5" >runtime/int..</text>
+</g>
+<g >
+<title>runtime.futexwakeup (2 samples, 2.04%)</title><rect x="551.8" y="53" width="24.1" height="15.0" fill="rgb(219,66,15)" rx="2" ry="2" />
+<text  x="554.84" y="63.5" >r..</text>
+</g>
+<g >
+<title>k8s.io/klog/v2.(*loggingT).printWithInfos (1 samples, 1.02%)</title><rect x="756.5" y="469" width="12.1" height="15.0" fill="rgb(219,67,16)" rx="2" ry="2" />
+<text  x="759.53" y="479.5" ></text>
+</g>
+<g >
+<title>github.com/google/cadvisor/container/common.GetSpec (1 samples, 1.02%)</title><rect x="804.7" y="341" width="12.0" height="15.0" fill="rgb(250,211,50)" rx="2" ry="2" />
+<text  x="807.69" y="351.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/stats.(*criStatsProvider).listPodStats (2 samples, 2.04%)</title><rect x="792.7" y="469" width="24.0" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="795.65" y="479.5" >k..</text>
+</g>
+<g >
+<title>runtime.futexwakeup (2 samples, 2.04%)</title><rect x="889.0" y="293" width="24.1" height="15.0" fill="rgb(219,66,15)" rx="2" ry="2" />
+<text  x="891.98" y="303.5" >r..</text>
+</g>
+<g >
+<title>syscall.RawSyscall6 (1 samples, 1.02%)</title><rect x="118.4" y="325" width="12.0" height="15.0" fill="rgb(241,167,40)" rx="2" ry="2" />
+<text  x="121.37" y="335.5" ></text>
+</g>
+<g >
+<title>runtime.runtimer (3 samples, 3.06%)</title><rect x="889.0" y="469" width="36.1" height="15.0" fill="rgb(205,4,0)" rx="2" ry="2" />
+<text  x="891.98" y="479.5" >run..</text>
+</g>
+<g >
+<title>runtime.schedule (25 samples, 25.51%)</title><rect x="876.9" y="517" width="301.1" height="15.0" fill="rgb(220,72,17)" rx="2" ry="2" />
+<text  x="879.94" y="527.5" >runtime.schedule</text>
+</g>
+<g >
+<title>runtime.newobject (1 samples, 1.02%)</title><rect x="479.6" y="277" width="12.0" height="15.0" fill="rgb(221,75,18)" rx="2" ry="2" />
+<text  x="482.59" y="287.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/cri/remote.(*remoteRuntimeService).ListPodSandbox (4 samples, 4.08%)</title><rect x="539.8" y="421" width="48.2" height="15.0" fill="rgb(227,104,24)" rx="2" ry="2" />
+<text  x="542.80" y="431.5" >k8s...</text>
+</g>
+<g >
+<title>github.com/google/cadvisor/manager.(*containerData).updateSpec (1 samples, 1.02%)</title><rect x="768.6" y="405" width="12.0" height="15.0" fill="rgb(248,197,47)" rx="2" ry="2" />
+<text  x="771.57" y="415.5" ></text>
+</g>
+<g >
+<title>syscall.RawSyscall6 (1 samples, 1.02%)</title><rect x="768.6" y="277" width="12.0" height="15.0" fill="rgb(241,167,40)" rx="2" ry="2" />
+<text  x="771.57" y="287.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet.(*Kubelet).cleanupOrphanedPodDirs (1 samples, 1.02%)</title><rect x="612.0" y="485" width="12.1" height="15.0" fill="rgb(250,211,50)" rx="2" ry="2" />
+<text  x="615.04" y="495.5" ></text>
+</g>
+<g >
+<title>runtime.send.goready.func1 (2 samples, 2.04%)</title><rect x="889.0" y="373" width="24.1" height="15.0" fill="rgb(226,97,23)" rx="2" ry="2" />
+<text  x="891.98" y="383.5" >r..</text>
+</g>
+<g >
+<title>runtime/internal/syscall.Syscall6 (2 samples, 2.04%)</title><rect x="94.3" y="309" width="24.1" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="97.29" y="319.5" >r..</text>
+</g>
+<g >
+<title>os.newUnixDirent (1 samples, 1.02%)</title><rect x="636.1" y="421" width="12.1" height="15.0" fill="rgb(245,184,44)" rx="2" ry="2" />
+<text  x="639.12" y="431.5" ></text>
+</g>
+<g >
+<title>runtime.futex (1 samples, 1.02%)</title><rect x="864.9" y="421" width="12.0" height="15.0" fill="rgb(237,150,35)" rx="2" ry="2" />
+<text  x="867.90" y="431.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc.(*clientStream).RecvMsg.func1 (1 samples, 1.02%)</title><rect x="527.8" y="293" width="12.0" height="15.0" fill="rgb(244,180,43)" rx="2" ry="2" />
+<text  x="530.76" y="303.5" ></text>
+</g>
+<g >
+<title>runtime/internal/syscall.EpollWait (3 samples, 3.06%)</title><rect x="997.3" y="469" width="36.2" height="15.0" fill="rgb(233,130,31)" rx="2" ry="2" />
+<text  x="1000.35" y="479.5" >run..</text>
+</g>
+<g >
+<title>internal/poll.(*FD).Init (1 samples, 1.02%)</title><rect x="612.0" y="389" width="12.1" height="15.0" fill="rgb(221,77,18)" rx="2" ry="2" />
+<text  x="615.04" y="399.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc.(*clientStream).RecvMsg (1 samples, 1.02%)</title><rect x="720.4" y="293" width="12.0" height="15.0" fill="rgb(222,82,19)" rx="2" ry="2" />
+<text  x="723.41" y="303.5" ></text>
+</g>
+<g >
+<title>github.com/google/cadvisor/manager.(*manager).GetContainerInfoV2 (2 samples, 2.04%)</title><rect x="792.7" y="405" width="24.0" height="15.0" fill="rgb(232,127,30)" rx="2" ry="2" />
+<text  x="795.65" y="415.5" >g..</text>
+</g>
+<g >
+<title>internal/poll.(*pollDesc).init (2 samples, 2.04%)</title><rect x="94.3" y="357" width="24.1" height="15.0" fill="rgb(246,191,45)" rx="2" ry="2" />
+<text  x="97.29" y="367.5" >i..</text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/config.(*sourcesImpl).AllReady (2 samples, 2.04%)</title><rect x="732.4" y="501" width="24.1" height="15.0" fill="rgb(227,105,25)" rx="2" ry="2" />
+<text  x="735.45" y="511.5" >k..</text>
+</g>
+<g >
+<title>google.golang.org/grpc.(*clientStream).withRetry (1 samples, 1.02%)</title><rect x="491.6" y="293" width="12.1" height="15.0" fill="rgb(244,182,43)" rx="2" ry="2" />
+<text  x="494.63" y="303.5" ></text>
+</g>
+<g >
+<title>syscall.RawSyscall6 (9 samples, 9.18%)</title><rect x="347.1" y="405" width="108.4" height="15.0" fill="rgb(241,167,40)" rx="2" ry="2" />
+<text  x="350.14" y="415.5" >syscall.RawSy..</text>
+</g>
+<g >
+<title>net.(*netFD).Read (10 samples, 10.20%)</title><rect x="178.6" y="453" width="120.4" height="15.0" fill="rgb(253,223,53)" rx="2" ry="2" />
+<text  x="181.57" y="463.5" >net.(*netFD).Read</text>
+</g>
+<g >
+<title>internal/poll.(*FD).Init (2 samples, 2.04%)</title><rect x="94.3" y="373" width="24.1" height="15.0" fill="rgb(221,77,18)" rx="2" ry="2" />
+<text  x="97.29" y="383.5" >i..</text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/kuberuntime.(*kubeGenericRuntimeManager).getKubeletContainers (1 samples, 1.02%)</title><rect x="708.4" y="421" width="12.0" height="15.0" fill="rgb(207,11,2)" rx="2" ry="2" />
+<text  x="711.37" y="431.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc.newClientStreamWithParams (1 samples, 1.02%)</title><rect x="491.6" y="309" width="12.1" height="15.0" fill="rgb(214,42,10)" rx="2" ry="2" />
+<text  x="494.63" y="319.5" ></text>
+</g>
+<g >
+<title>runtime.stackpoolalloc (1 samples, 1.02%)</title><rect x="828.8" y="373" width="12.0" height="15.0" fill="rgb(245,188,45)" rx="2" ry="2" />
+<text  x="831.78" y="383.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc.newClientStream.func3 (1 samples, 1.02%)</title><rect x="491.6" y="325" width="12.1" height="15.0" fill="rgb(237,150,35)" rx="2" ry="2" />
+<text  x="494.63" y="335.5" ></text>
+</g>
+<g >
+<title>golang.org/x/net/http2/hpack.(*headerFieldTable).search (1 samples, 1.02%)</title><rect x="467.6" y="421" width="12.0" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="470.55" y="431.5" ></text>
+</g>
+<g >
+<title>syscall.Fstat (1 samples, 1.02%)</title><rect x="768.6" y="309" width="12.0" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="771.57" y="319.5" ></text>
+</g>
+<g >
+<title>runtime.startm (2 samples, 2.04%)</title><rect x="551.8" y="85" width="24.1" height="15.0" fill="rgb(220,71,17)" rx="2" ry="2" />
+<text  x="554.84" y="95.5" >r..</text>
+</g>
+<g >
+<title>sort.pdqsort_func (1 samples, 1.02%)</title><rect x="696.3" y="421" width="12.1" height="15.0" fill="rgb(246,193,46)" rx="2" ry="2" />
+<text  x="699.33" y="431.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/stats.(*criStatsProvider).listPodStatsPartiallyFromCRI (2 samples, 2.04%)</title><rect x="792.7" y="453" width="24.0" height="15.0" fill="rgb(210,25,5)" rx="2" ry="2" />
+<text  x="795.65" y="463.5" >k..</text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/config.(*podStorage).merge.func1 (1 samples, 1.02%)</title><rect x="588.0" y="437" width="12.0" height="15.0" fill="rgb(254,225,54)" rx="2" ry="2" />
+<text  x="590.96" y="447.5" ></text>
+</g>
+<g >
+<title>k8s.io/klog/v2.Verbose.InfoS (1 samples, 1.02%)</title><rect x="600.0" y="501" width="12.0" height="15.0" fill="rgb(232,128,30)" rx="2" ry="2" />
+<text  x="603.00" y="511.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc.(*clientStream).newAttemptLocked (1 samples, 1.02%)</title><rect x="491.6" y="277" width="12.1" height="15.0" fill="rgb(245,186,44)" rx="2" ry="2" />
+<text  x="494.63" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.wakep (1 samples, 1.02%)</title><rect x="864.9" y="485" width="12.0" height="15.0" fill="rgb(216,54,13)" rx="2" ry="2" />
+<text  x="867.90" y="495.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/kuberuntime.(*kubeGenericRuntimeManager).getKubeletContainers (1 samples, 1.02%)</title><rect x="479.6" y="389" width="12.0" height="15.0" fill="rgb(207,11,2)" rx="2" ry="2" />
+<text  x="482.59" y="399.5" ></text>
+</g>
+<g >
+<title>runtime.futex (1 samples, 1.02%)</title><rect x="190.6" y="293" width="12.1" height="15.0" fill="rgb(237,150,35)" rx="2" ry="2" />
+<text  x="193.61" y="303.5" ></text>
+</g>
+<g >
+<title>runtime.memclrNoHeapPointers (1 samples, 1.02%)</title><rect x="792.7" y="341" width="12.0" height="15.0" fill="rgb(252,219,52)" rx="2" ry="2" />
+<text  x="795.65" y="351.5" ></text>
+</g>
+<g >
+<title>os.OpenFile (1 samples, 1.02%)</title><rect x="612.0" y="437" width="12.1" height="15.0" fill="rgb(228,110,26)" rx="2" ry="2" />
+<text  x="615.04" y="447.5" ></text>
+</g>
+<g >
+<title>github.com/google/cadvisor/container/raw.(*rawContainerWatcher).processEvent (1 samples, 1.02%)</title><rect x="10.0" y="533" width="12.0" height="15.0" fill="rgb(222,81,19)" rx="2" ry="2" />
+<text  x="13.00" y="543.5" ></text>
+</g>
+<g >
+<title>runtime.(*waitq).enqueue (1 samples, 1.02%)</title><rect x="503.7" y="277" width="12.0" height="15.0" fill="rgb(225,92,22)" rx="2" ry="2" />
+<text  x="506.67" y="287.5" ></text>
+</g>
+<g >
+<title>os.openFileNolog (1 samples, 1.02%)</title><rect x="22.0" y="421" width="12.1" height="15.0" fill="rgb(221,74,17)" rx="2" ry="2" />
+<text  x="25.04" y="431.5" ></text>
+</g>
+<g >
+<title>runtime.selectnbsend (3 samples, 3.06%)</title><rect x="889.0" y="421" width="36.1" height="15.0" fill="rgb(249,204,48)" rx="2" ry="2" />
+<text  x="891.98" y="431.5" >run..</text>
+</g>
+<g >
+<title>go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc.UnaryClientInterceptor.func1 (1 samples, 1.02%)</title><rect x="720.4" y="325" width="12.0" height="15.0" fill="rgb(211,28,6)" rx="2" ry="2" />
+<text  x="723.41" y="335.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc/internal/transport.(*http2Client).NewStream (2 samples, 2.04%)</title><rect x="551.8" y="229" width="24.1" height="15.0" fill="rgb(215,49,11)" rx="2" ry="2" />
+<text  x="554.84" y="239.5" >g..</text>
+</g>
+<g >
+<title>google.golang.org/grpc.(*csAttempt).newStream (2 samples, 2.04%)</title><rect x="551.8" y="245" width="24.1" height="15.0" fill="rgb(228,106,25)" rx="2" ry="2" />
+<text  x="554.84" y="255.5" >g..</text>
+</g>
+<g >
+<title>k8s.io/utils/inotify.(*Watcher).RemoveWatch (1 samples, 1.02%)</title><rect x="10.0" y="501" width="12.0" height="15.0" fill="rgb(225,93,22)" rx="2" ry="2" />
+<text  x="13.00" y="511.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/kuberuntime.(*kubeGenericRuntimeManager).ListImages (1 samples, 1.02%)</title><rect x="491.6" y="469" width="12.1" height="15.0" fill="rgb(232,125,30)" rx="2" ry="2" />
+<text  x="494.63" y="479.5" ></text>
+</g>
+<g >
+<title>github.com/golang/protobuf/proto.MessageV2 (1 samples, 1.02%)</title><rect x="527.8" y="213" width="12.0" height="15.0" fill="rgb(218,60,14)" rx="2" ry="2" />
+<text  x="530.76" y="223.5" ></text>
+</g>
+<g >
+<title>github.com/google/cadvisor/container/libcontainer.(*Handler).GetStats (9 samples, 9.18%)</title><rect x="22.0" y="485" width="108.4" height="15.0" fill="rgb(234,134,32)" rx="2" ry="2" />
+<text  x="25.04" y="495.5" >github.com/go..</text>
+</g>
+<g >
+<title>google.golang.org/grpc/internal/transport.(*http2Client).reader (14 samples, 14.29%)</title><rect x="166.5" y="549" width="168.6" height="15.0" fill="rgb(245,186,44)" rx="2" ry="2" />
+<text  x="169.53" y="559.5" >google.golang.org/grp..</text>
+</g>
+<g >
+<title>os.Open (1 samples, 1.02%)</title><rect x="612.0" y="453" width="12.1" height="15.0" fill="rgb(209,21,5)" rx="2" ry="2" />
+<text  x="615.04" y="463.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/util/config.(*Mux).listen (1 samples, 1.02%)</title><rect x="588.0" y="485" width="12.0" height="15.0" fill="rgb(254,228,54)" rx="2" ry="2" />
+<text  x="590.96" y="495.5" ></text>
+</g>
+<g >
+<title>runtime.findRunnable (16 samples, 16.33%)</title><rect x="889.0" y="501" width="192.6" height="15.0" fill="rgb(219,64,15)" rx="2" ry="2" />
+<text  x="891.98" y="511.5" >runtime.findRunnable</text>
+</g>
+<g >
+<title>runtime.(*mheap).alloc.func1 (1 samples, 1.02%)</title><rect x="46.1" y="309" width="12.1" height="15.0" fill="rgb(252,216,51)" rx="2" ry="2" />
+<text  x="49.12" y="319.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc/internal/transport.(*loopyWriter).handle (2 samples, 2.04%)</title><rect x="455.5" y="517" width="24.1" height="15.0" fill="rgb(227,101,24)" rx="2" ry="2" />
+<text  x="458.51" y="527.5" >g..</text>
+</g>
+<g >
+<title>runtime.futex (8 samples, 8.16%)</title><rect x="1081.6" y="421" width="96.4" height="15.0" fill="rgb(237,150,35)" rx="2" ry="2" />
+<text  x="1084.63" y="431.5" >runtime.futex</text>
+</g>
+<g >
+<title>os.(*File).write (1 samples, 1.02%)</title><rect x="756.5" y="437" width="12.1" height="15.0" fill="rgb(248,201,48)" rx="2" ry="2" />
+<text  x="759.53" y="447.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc.OnFinishCallOption.after (1 samples, 1.02%)</title><rect x="539.8" y="293" width="12.0" height="15.0" fill="rgb(217,57,13)" rx="2" ry="2" />
+<text  x="542.80" y="303.5" ></text>
+</g>
+<g >
+<title>runtime.stackalloc (2 samples, 2.04%)</title><rect x="828.8" y="405" width="24.1" height="15.0" fill="rgb(251,212,50)" rx="2" ry="2" />
+<text  x="831.78" y="415.5" >r..</text>
+</g>
+<g >
+<title>runtime.entersyscall (1 samples, 1.02%)</title><rect x="756.5" y="373" width="12.1" height="15.0" fill="rgb(249,203,48)" rx="2" ry="2" />
+<text  x="759.53" y="383.5" ></text>
+</g>
+<g >
+<title>runtime.startm (2 samples, 2.04%)</title><rect x="889.0" y="325" width="24.1" height="15.0" fill="rgb(220,71,17)" rx="2" ry="2" />
+<text  x="891.98" y="335.5" >r..</text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/stats.getCgroupInfo (1 samples, 1.02%)</title><rect x="768.6" y="469" width="12.0" height="15.0" fill="rgb(207,11,2)" rx="2" ry="2" />
+<text  x="771.57" y="479.5" ></text>
+</g>
+<g >
+<title>runtime/internal/syscall.Syscall6 (1 samples, 1.02%)</title><rect x="672.2" y="357" width="12.1" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="675.24" y="367.5" ></text>
+</g>
+<g >
+<title>fmt.(*pp).free (1 samples, 1.02%)</title><rect x="154.5" y="469" width="12.0" height="15.0" fill="rgb(215,46,11)" rx="2" ry="2" />
+<text  x="157.49" y="479.5" ></text>
+</g>
+<g >
+<title>golang.org/x/sys/unix.Openat2 (1 samples, 1.02%)</title><rect x="82.2" y="405" width="12.1" height="15.0" fill="rgb(248,200,47)" rx="2" ry="2" />
+<text  x="85.24" y="415.5" ></text>
+</g>
+<g >
+<title>runtime.lock2 (1 samples, 1.02%)</title><rect x="913.1" y="389" width="12.0" height="15.0" fill="rgb(210,27,6)" rx="2" ry="2" />
+<text  x="916.06" y="399.5" ></text>
+</g>
+<g >
+<title>os.(*File).readdir (1 samples, 1.02%)</title><rect x="34.1" y="421" width="12.0" height="15.0" fill="rgb(211,32,7)" rx="2" ry="2" />
+<text  x="37.08" y="431.5" ></text>
+</g>
+<g >
+<title>runtime.send.goready.func1 (2 samples, 2.04%)</title><rect x="551.8" y="133" width="24.1" height="15.0" fill="rgb(226,97,23)" rx="2" ry="2" />
+<text  x="554.84" y="143.5" >r..</text>
+</g>
+<g >
+<title>runtime.startm (1 samples, 1.02%)</title><rect x="311.0" y="389" width="12.1" height="15.0" fill="rgb(220,71,17)" rx="2" ry="2" />
+<text  x="314.02" y="399.5" ></text>
+</g>
+<g >
+<title>os.(*File).ReadDir (1 samples, 1.02%)</title><rect x="34.1" y="437" width="12.0" height="15.0" fill="rgb(225,93,22)" rx="2" ry="2" />
+<text  x="37.08" y="447.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcache).refill (1 samples, 1.02%)</title><rect x="46.1" y="389" width="12.1" height="15.0" fill="rgb(232,124,29)" rx="2" ry="2" />
+<text  x="49.12" y="399.5" ></text>
+</g>
+<g >
+<title>runtime.reentersyscall (1 samples, 1.02%)</title><rect x="335.1" y="389" width="12.0" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="338.10" y="399.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/cm.(*podContainerManagerImpl).GetAllPodsFromCgroups (7 samples, 7.14%)</title><rect x="624.1" y="485" width="84.3" height="15.0" fill="rgb(244,181,43)" rx="2" ry="2" />
+<text  x="627.08" y="495.5" >k8s.io/ku..</text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/cri/remote.(*remoteRuntimeService).ListContainers (1 samples, 1.02%)</title><rect x="708.4" y="389" width="12.0" height="15.0" fill="rgb(245,184,44)" rx="2" ry="2" />
+<text  x="711.37" y="399.5" ></text>
+</g>
+<g >
+<title>runtime.futex (4 samples, 4.08%)</title><rect x="949.2" y="437" width="48.1" height="15.0" fill="rgb(237,150,35)" rx="2" ry="2" />
+<text  x="952.18" y="447.5" >runt..</text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/cri/remote.(*remoteImageService).listImagesV1 (1 samples, 1.02%)</title><rect x="491.6" y="421" width="12.1" height="15.0" fill="rgb(220,71,17)" rx="2" ry="2" />
+<text  x="494.63" y="431.5" ></text>
+</g>
+<g >
+<title>os.ReadDir (1 samples, 1.02%)</title><rect x="34.1" y="453" width="12.0" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="37.08" y="463.5" ></text>
+</g>
+<g >
+<title>syscall.Read (9 samples, 9.18%)</title><rect x="190.6" y="437" width="108.4" height="15.0" fill="rgb(232,127,30)" rx="2" ry="2" />
+<text  x="193.61" y="447.5" >syscall.Read</text>
+</g>
+<g >
+<title>golang.org/x/net/http2.(*Framer).ReadFrame (11 samples, 11.22%)</title><rect x="166.5" y="533" width="132.5" height="15.0" fill="rgb(225,95,22)" rx="2" ry="2" />
+<text  x="169.53" y="543.5" >golang.org/x/net..</text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/cri/remote.(*remoteRuntimeService).listPodSandboxV1 (1 samples, 1.02%)</title><rect x="720.4" y="373" width="12.0" height="15.0" fill="rgb(248,202,48)" rx="2" ry="2" />
+<text  x="723.41" y="383.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/kuberuntime.instrumentedRuntimeService.ListContainers (1 samples, 1.02%)</title><rect x="708.4" y="405" width="12.0" height="15.0" fill="rgb(213,38,9)" rx="2" ry="2" />
+<text  x="711.37" y="415.5" ></text>
+</g>
+<g >
+<title>github.com/google/cadvisor/info/v2.ContainerStatsFromV1 (1 samples, 1.02%)</title><rect x="792.7" y="389" width="12.0" height="15.0" fill="rgb(225,96,22)" rx="2" ry="2" />
+<text  x="795.65" y="399.5" ></text>
+</g>
+<g >
+<title>github.com/google/cadvisor/manager.(*manager).detectSubcontainers (1 samples, 1.02%)</title><rect x="142.4" y="533" width="12.1" height="15.0" fill="rgb(216,50,12)" rx="2" ry="2" />
+<text  x="145.45" y="543.5" ></text>
+</g>
+<g >
+<title>github.com/google/cadvisor/manager.(*containerData).housekeepingTick (10 samples, 10.20%)</title><rect x="22.0" y="533" width="120.4" height="15.0" fill="rgb(237,151,36)" rx="2" ry="2" />
+<text  x="25.04" y="543.5" >github.com/goog..</text>
+</g>
+<g >
+<title>os.newFile (2 samples, 2.04%)</title><rect x="94.3" y="389" width="24.1" height="15.0" fill="rgb(244,179,43)" rx="2" ry="2" />
+<text  x="97.29" y="399.5" >o..</text>
+</g>
+<g >
+<title>runtime.mallocgc (1 samples, 1.02%)</title><rect x="575.9" y="293" width="12.1" height="15.0" fill="rgb(241,169,40)" rx="2" ry="2" />
+<text  x="578.92" y="303.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc/internal/transport.(*loopyWriter).writeHeader (2 samples, 2.04%)</title><rect x="455.5" y="469" width="24.1" height="15.0" fill="rgb(217,59,14)" rx="2" ry="2" />
+<text  x="458.51" y="479.5" >g..</text>
+</g>
+<g >
+<title>runtime.futexwakeup (1 samples, 1.02%)</title><rect x="864.9" y="437" width="12.0" height="15.0" fill="rgb(219,66,15)" rx="2" ry="2" />
+<text  x="867.90" y="447.5" ></text>
+</g>
+<g >
+<title>internal/poll.runtime_pollOpen (1 samples, 1.02%)</title><rect x="612.0" y="357" width="12.1" height="15.0" fill="rgb(231,121,29)" rx="2" ry="2" />
+<text  x="615.04" y="367.5" ></text>
+</g>
+<g >
+<title>internal/poll.(*pollDesc).init (1 samples, 1.02%)</title><rect x="22.0" y="373" width="12.1" height="15.0" fill="rgb(246,191,45)" rx="2" ry="2" />
+<text  x="25.04" y="383.5" ></text>
+</g>
+<g >
+<title>syscall.Write (10 samples, 10.20%)</title><rect x="335.1" y="453" width="120.4" height="15.0" fill="rgb(208,18,4)" rx="2" ry="2" />
+<text  x="338.10" y="463.5" >syscall.Write</text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/cri/remote.(*remoteRuntimeService).ListContainers (1 samples, 1.02%)</title><rect x="503.7" y="453" width="12.0" height="15.0" fill="rgb(245,184,44)" rx="2" ry="2" />
+<text  x="506.67" y="463.5" ></text>
+</g>
+<g >
+<title>k8s.io/cri-api/pkg/apis/runtime/v1.(*imageServiceClient).ImageFsInfo (1 samples, 1.02%)</title><rect x="780.6" y="437" width="12.1" height="15.0" fill="rgb(248,201,48)" rx="2" ry="2" />
+<text  x="783.61" y="447.5" ></text>
+</g>
+<g >
+<title>runtime.makeslice (1 samples, 1.02%)</title><rect x="46.1" y="437" width="12.1" height="15.0" fill="rgb(244,180,43)" rx="2" ry="2" />
+<text  x="49.12" y="447.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc/internal/transport.(*loopyWriter).originateStream (2 samples, 2.04%)</title><rect x="455.5" y="485" width="24.1" height="15.0" fill="rgb(212,35,8)" rx="2" ry="2" />
+<text  x="458.51" y="495.5" >g..</text>
+</g>
+<g >
+<title>k8s.io/apimachinery/pkg/util/sets.String.List (1 samples, 1.02%)</title><rect x="732.4" y="485" width="12.1" height="15.0" fill="rgb(250,207,49)" rx="2" ry="2" />
+<text  x="735.45" y="495.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet.(*Kubelet).syncLoop (13 samples, 13.27%)</title><rect x="600.0" y="533" width="156.5" height="15.0" fill="rgb(238,152,36)" rx="2" ry="2" />
+<text  x="603.00" y="543.5" >k8s.io/kubernetes/pk..</text>
+</g>
+<g >
+<title>os.ReadFile (1 samples, 1.02%)</title><rect x="768.6" y="357" width="12.0" height="15.0" fill="rgb(221,74,17)" rx="2" ry="2" />
+<text  x="771.57" y="367.5" ></text>
+</g>
+<g >
+<title>internal/poll.runtime_pollOpen (1 samples, 1.02%)</title><rect x="22.0" y="357" width="12.1" height="15.0" fill="rgb(231,121,29)" rx="2" ry="2" />
+<text  x="25.04" y="367.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc.invoke (1 samples, 1.02%)</title><rect x="780.6" y="389" width="12.1" height="15.0" fill="rgb(225,93,22)" rx="2" ry="2" />
+<text  x="783.61" y="399.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/config.(*podStorage).merge (1 samples, 1.02%)</title><rect x="588.0" y="453" width="12.0" height="15.0" fill="rgb(232,127,30)" rx="2" ry="2" />
+<text  x="590.96" y="463.5" ></text>
+</g>
+<g >
+<title>github.com/google/cadvisor/manager.(*manager).GetContainerInfoV2 (1 samples, 1.02%)</title><rect x="768.6" y="437" width="12.0" height="15.0" fill="rgb(232,127,30)" rx="2" ry="2" />
+<text  x="771.57" y="447.5" ></text>
+</g>
+<g >
+<title>runtime/internal/syscall.Syscall6 (1 samples, 1.02%)</title><rect x="612.0" y="325" width="12.1" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="615.04" y="335.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc.newClientStream (1 samples, 1.02%)</title><rect x="491.6" y="341" width="12.1" height="15.0" fill="rgb(229,111,26)" rx="2" ry="2" />
+<text  x="494.63" y="351.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc.recv (1 samples, 1.02%)</title><rect x="720.4" y="229" width="12.0" height="15.0" fill="rgb(246,191,45)" rx="2" ry="2" />
+<text  x="723.41" y="239.5" ></text>
+</g>
+<g >
+<title>k8s.io/apimachinery/pkg/util/runtime.HandleCrash (1 samples, 1.02%)</title><rect x="816.7" y="469" width="12.1" height="15.0" fill="rgb(226,98,23)" rx="2" ry="2" />
+<text  x="819.73" y="479.5" ></text>
+</g>
+<g >
+<title>syscall.Syscall (1 samples, 1.02%)</title><rect x="34.1" y="373" width="12.0" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="37.08" y="383.5" ></text>
+</g>
+<g >
+<title>runtime.systemstack (2 samples, 2.04%)</title><rect x="828.8" y="533" width="24.1" height="15.0" fill="rgb(206,6,1)" rx="2" ry="2" />
+<text  x="831.78" y="543.5" >r..</text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/server/stats.(*summaryProviderImpl).Get (4 samples, 4.08%)</title><rect x="768.6" y="517" width="48.1" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="771.57" y="527.5" >k8s...</text>
+</g>
+<g >
+<title>google.golang.org/grpc.newClientStream.func3 (2 samples, 2.04%)</title><rect x="551.8" y="309" width="24.1" height="15.0" fill="rgb(237,150,35)" rx="2" ry="2" />
+<text  x="554.84" y="319.5" >g..</text>
+</g>
+<g >
+<title>runtime.gorecover (1 samples, 1.02%)</title><rect x="816.7" y="453" width="12.1" height="15.0" fill="rgb(250,208,49)" rx="2" ry="2" />
+<text  x="819.73" y="463.5" ></text>
+</g>
+<g >
+<title>runtime.markroot (2 samples, 2.04%)</title><rect x="828.8" y="485" width="24.1" height="15.0" fill="rgb(251,212,50)" rx="2" ry="2" />
+<text  x="831.78" y="495.5" >r..</text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/container.(*realContainerGC).GarbageCollect (1 samples, 1.02%)</title><rect x="479.6" y="469" width="12.0" height="15.0" fill="rgb(207,12,3)" rx="2" ry="2" />
+<text  x="482.59" y="479.5" ></text>
+</g>
+<g >
+<title>k8s.io/klog/v2/internal/buffer.PutBuffer (1 samples, 1.02%)</title><rect x="600.0" y="469" width="12.0" height="15.0" fill="rgb(238,155,37)" rx="2" ry="2" />
+<text  x="603.00" y="479.5" ></text>
+</g>
+<g >
+<title>runtime.scanstack (2 samples, 2.04%)</title><rect x="828.8" y="453" width="24.1" height="15.0" fill="rgb(210,23,5)" rx="2" ry="2" />
+<text  x="831.78" y="463.5" >r..</text>
+</g>
+<g >
+<title>runtime.mapaccess1 (1 samples, 1.02%)</title><rect x="467.6" y="405" width="12.0" height="15.0" fill="rgb(214,44,10)" rx="2" ry="2" />
+<text  x="470.55" y="415.5" ></text>
+</g>
+<g >
+<title>runtime.ready (2 samples, 2.04%)</title><rect x="551.8" y="117" width="24.1" height="15.0" fill="rgb(236,143,34)" rx="2" ry="2" />
+<text  x="554.84" y="127.5" >r..</text>
+</g>
+<g >
+<title>runtime.systemstack (1 samples, 1.02%)</title><rect x="756.5" y="341" width="12.1" height="15.0" fill="rgb(206,6,1)" rx="2" ry="2" />
+<text  x="759.53" y="351.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/stats.(*criStatsProvider).ImageFsStats (1 samples, 1.02%)</title><rect x="780.6" y="485" width="12.1" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="783.61" y="495.5" ></text>
+</g>
+<g >
+<title>k8s.io/apimachinery/pkg/util/wait.BackoffUntil.func1 (10 samples, 10.20%)</title><rect x="479.6" y="501" width="120.4" height="15.0" fill="rgb(217,57,13)" rx="2" ry="2" />
+<text  x="482.59" y="511.5" >k8s.io/apimachi..</text>
+</g>
+<g >
+<title>runtime/internal/syscall.Syscall6 (1 samples, 1.02%)</title><rect x="142.4" y="357" width="12.1" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="145.45" y="367.5" ></text>
+</g>
+<g >
+<title>syscall.Syscall (1 samples, 1.02%)</title><rect x="142.4" y="389" width="12.1" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="145.45" y="399.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc.(*clientStream).RecvMsg.func1 (1 samples, 1.02%)</title><rect x="720.4" y="261" width="12.0" height="15.0" fill="rgb(244,180,43)" rx="2" ry="2" />
+<text  x="723.41" y="271.5" ></text>
+</g>
+<g >
+<title>syscall.Getdents (1 samples, 1.02%)</title><rect x="142.4" y="405" width="12.1" height="15.0" fill="rgb(225,95,22)" rx="2" ry="2" />
+<text  x="145.45" y="415.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/cri/remote.(*remoteRuntimeService).ListPodSandbox (1 samples, 1.02%)</title><rect x="720.4" y="389" width="12.0" height="15.0" fill="rgb(227,104,24)" rx="2" ry="2" />
+<text  x="723.41" y="399.5" ></text>
+</g>
+<g >
+<title>github.com/google/cadvisor/manager.(*manager).updateMachineInfo (1 samples, 1.02%)</title><rect x="154.5" y="549" width="12.0" height="15.0" fill="rgb(205,1,0)" rx="2" ry="2" />
+<text  x="157.49" y="559.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/kuberuntime.instrumentedRuntimeService.ListContainers (1 samples, 1.02%)</title><rect x="527.8" y="437" width="12.0" height="15.0" fill="rgb(213,38,9)" rx="2" ry="2" />
+<text  x="530.76" y="447.5" ></text>
+</g>
+<g >
+<title>runtime.gcDrain (2 samples, 2.04%)</title><rect x="828.8" y="501" width="24.1" height="15.0" fill="rgb(233,130,31)" rx="2" ry="2" />
+<text  x="831.78" y="511.5" >r..</text>
+</g>
+<g >
+<title>io.ReadAtLeast (10 samples, 10.20%)</title><rect x="178.6" y="501" width="120.4" height="15.0" fill="rgb(234,137,32)" rx="2" ry="2" />
+<text  x="181.57" y="511.5" >io.ReadAtLeast</text>
+</g>
+<g >
+<title>os.ReadDir.func1 (1 samples, 1.02%)</title><rect x="696.3" y="389" width="12.1" height="15.0" fill="rgb(219,65,15)" rx="2" ry="2" />
+<text  x="699.33" y="399.5" ></text>
+</g>
+<g >
+<title>runtime/internal/syscall.Syscall6 (1 samples, 1.02%)</title><rect x="768.6" y="261" width="12.0" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="771.57" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.copystack (2 samples, 2.04%)</title><rect x="828.8" y="421" width="24.1" height="15.0" fill="rgb(218,60,14)" rx="2" ry="2" />
+<text  x="831.78" y="431.5" >r..</text>
+</g>
+<g >
+<title>runtime/internal/syscall.Syscall6 (1 samples, 1.02%)</title><rect x="118.4" y="309" width="12.0" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="121.37" y="319.5" ></text>
+</g>
+<g >
+<title>runtime.markroot.func1 (2 samples, 2.04%)</title><rect x="828.8" y="469" width="24.1" height="15.0" fill="rgb(222,80,19)" rx="2" ry="2" />
+<text  x="831.78" y="479.5" >r..</text>
+</g>
+<g >
+<title>os.OpenFile (2 samples, 2.04%)</title><rect x="94.3" y="421" width="24.1" height="15.0" fill="rgb(228,110,26)" rx="2" ry="2" />
+<text  x="97.29" y="431.5" >o..</text>
+</g>
+<g >
+<title>runtime.goready (1 samples, 1.02%)</title><rect x="311.0" y="469" width="12.1" height="15.0" fill="rgb(253,224,53)" rx="2" ry="2" />
+<text  x="314.02" y="479.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/kuberuntime.(*containerGC).evictContainers (1 samples, 1.02%)</title><rect x="479.6" y="421" width="12.0" height="15.0" fill="rgb(212,33,8)" rx="2" ry="2" />
+<text  x="482.59" y="431.5" ></text>
+</g>
+<g >
+<title>runtime.mallocgc (1 samples, 1.02%)</title><rect x="636.1" y="389" width="12.1" height="15.0" fill="rgb(241,169,40)" rx="2" ry="2" />
+<text  x="639.12" y="399.5" ></text>
+</g>
+<g >
+<title>time.sendTime (3 samples, 3.06%)</title><rect x="889.0" y="437" width="36.1" height="15.0" fill="rgb(252,219,52)" rx="2" ry="2" />
+<text  x="891.98" y="447.5" >tim..</text>
+</g>
+<g >
+<title>runtime.systemstack (2 samples, 2.04%)</title><rect x="551.8" y="149" width="24.1" height="15.0" fill="rgb(206,6,1)" rx="2" ry="2" />
+<text  x="554.84" y="159.5" >r..</text>
+</g>
+<g >
+<title>google.golang.org/grpc/internal/transport.(*bufWriter).flushKeepBuffer (10 samples, 10.20%)</title><rect x="335.1" y="501" width="120.4" height="15.0" fill="rgb(242,172,41)" rx="2" ry="2" />
+<text  x="338.10" y="511.5" >google.golang.o..</text>
+</g>
+<g >
+<title>google.golang.org/grpc.(*clientStream).withRetry (1 samples, 1.02%)</title><rect x="780.6" y="357" width="12.1" height="15.0" fill="rgb(244,182,43)" rx="2" ry="2" />
+<text  x="783.61" y="367.5" ></text>
+</g>
+<g >
+<title>k8s.io/klog/v2.(*loggingT).infoS (1 samples, 1.02%)</title><rect x="756.5" y="517" width="12.1" height="15.0" fill="rgb(229,111,26)" rx="2" ry="2" />
+<text  x="759.53" y="527.5" ></text>
+</g>
+<g >
+<title>os.readInt (1 samples, 1.02%)</title><rect x="684.3" y="421" width="12.0" height="15.0" fill="rgb(213,38,9)" rx="2" ry="2" />
+<text  x="687.29" y="431.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/eviction.(*managerImpl).synchronize (4 samples, 4.08%)</title><rect x="768.6" y="533" width="48.1" height="15.0" fill="rgb(246,192,46)" rx="2" ry="2" />
+<text  x="771.57" y="543.5" >k8s...</text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/cri/remote.(*remoteImageService).imageFsInfoV1 (1 samples, 1.02%)</title><rect x="780.6" y="453" width="12.1" height="15.0" fill="rgb(221,77,18)" rx="2" ry="2" />
+<text  x="783.61" y="463.5" ></text>
+</g>
+<g >
+<title>k8s.io/klog/v2.(*loggingT).printS (1 samples, 1.02%)</title><rect x="756.5" y="501" width="12.1" height="15.0" fill="rgb(245,188,44)" rx="2" ry="2" />
+<text  x="759.53" y="511.5" ></text>
+</g>
+<g >
+<title>github.com/opencontainers/runc/libcontainer/cgroups/fs2.statPids (1 samples, 1.02%)</title><rect x="118.4" y="453" width="12.0" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="121.37" y="463.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc/internal/transport.(*controlBuffer).put (2 samples, 2.04%)</title><rect x="311.0" y="533" width="24.1" height="15.0" fill="rgb(248,202,48)" rx="2" ry="2" />
+<text  x="314.02" y="543.5" >g..</text>
+</g>
+<g >
+<title>syscall.InotifyRmWatch (1 samples, 1.02%)</title><rect x="10.0" y="485" width="12.0" height="15.0" fill="rgb(236,146,35)" rx="2" ry="2" />
+<text  x="13.00" y="495.5" ></text>
+</g>
+<g >
+<title>runtime.runqsteal (1 samples, 1.02%)</title><rect x="1069.6" y="469" width="12.0" height="15.0" fill="rgb(227,104,24)" rx="2" ry="2" />
+<text  x="1072.59" y="479.5" ></text>
+</g>
+<g >
+<title>syscall.Syscall (1 samples, 1.02%)</title><rect x="768.6" y="293" width="12.0" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="771.57" y="303.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc.(*clientStream).finish (1 samples, 1.02%)</title><rect x="539.8" y="309" width="12.0" height="15.0" fill="rgb(221,76,18)" rx="2" ry="2" />
+<text  x="542.80" y="319.5" ></text>
+</g>
+<g >
+<title>runtime.newstack (1 samples, 1.02%)</title><rect x="1178.0" y="533" width="12.0" height="15.0" fill="rgb(248,197,47)" rx="2" ry="2" />
+<text  x="1180.96" y="543.5" ></text>
+</g>
+<g >
+<title>syscall.Getdents (1 samples, 1.02%)</title><rect x="672.2" y="405" width="12.1" height="15.0" fill="rgb(225,95,22)" rx="2" ry="2" />
+<text  x="675.24" y="415.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc.(*ClientConn).Invoke (1 samples, 1.02%)</title><rect x="780.6" y="421" width="12.1" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="783.61" y="431.5" ></text>
+</g>
+<g >
+<title>runtime.systemstack (1 samples, 1.02%)</title><rect x="311.0" y="453" width="12.1" height="15.0" fill="rgb(206,6,1)" rx="2" ry="2" />
+<text  x="314.02" y="463.5" ></text>
+</g>
+<g >
+<title>os.newFile (1 samples, 1.02%)</title><rect x="612.0" y="405" width="12.1" height="15.0" fill="rgb(244,179,43)" rx="2" ry="2" />
+<text  x="615.04" y="415.5" ></text>
+</g>
+<g >
+<title>syscall.Syscall (1 samples, 1.02%)</title><rect x="756.5" y="389" width="12.1" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="759.53" y="399.5" ></text>
+</g>
+<g >
+<title>go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc.UnaryClientInterceptor.func1 (1 samples, 1.02%)</title><rect x="780.6" y="405" width="12.1" height="15.0" fill="rgb(211,28,6)" rx="2" ry="2" />
+<text  x="783.61" y="415.5" ></text>
+</g>
+<g >
+<title>syscall.RawSyscall6 (1 samples, 1.02%)</title><rect x="82.2" y="357" width="12.1" height="15.0" fill="rgb(241,167,40)" rx="2" ry="2" />
+<text  x="85.24" y="367.5" ></text>
+</g>
+<g >
+<title>sort.pdqsort_func (1 samples, 1.02%)</title><rect x="696.3" y="437" width="12.1" height="15.0" fill="rgb(246,193,46)" rx="2" ry="2" />
+<text  x="699.33" y="447.5" ></text>
+</g>
+<g >
+<title>github.com/opencontainers/runc/libcontainer/cgroups.OpenFile (1 samples, 1.02%)</title><rect x="82.2" y="421" width="12.1" height="15.0" fill="rgb(242,173,41)" rx="2" ry="2" />
+<text  x="85.24" y="431.5" ></text>
+</g>
+<g >
+<title>github.com/opencontainers/runc/libcontainer/cgroups/fs2.statIo (1 samples, 1.02%)</title><rect x="82.2" y="453" width="12.1" height="15.0" fill="rgb(234,137,32)" rx="2" ry="2" />
+<text  x="85.24" y="463.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc/internal/transport.(*controlBuffer).executeAndPut (1 samples, 1.02%)</title><rect x="311.0" y="517" width="12.1" height="15.0" fill="rgb(251,216,51)" rx="2" ry="2" />
+<text  x="314.02" y="527.5" ></text>
+</g>
+<g >
+<title>syscall.ReadDirent (1 samples, 1.02%)</title><rect x="672.2" y="421" width="12.1" height="15.0" fill="rgb(216,52,12)" rx="2" ry="2" />
+<text  x="675.24" y="431.5" ></text>
+</g>
+<g >
+<title>all (98 samples, 100%)</title><rect x="10.0" y="565" width="1180.0" height="15.0" fill="rgb(213,39,9)" rx="2" ry="2" />
+<text  x="13.00" y="575.5" ></text>
+</g>
+<g >
+<title>runtime.mcall (27 samples, 27.55%)</title><rect x="852.9" y="549" width="325.1" height="15.0" fill="rgb(213,40,9)" rx="2" ry="2" />
+<text  x="855.86" y="559.5" >runtime.mcall</text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/kuberuntime.instrumentedRuntimeService.ListPodSandbox (4 samples, 4.08%)</title><rect x="539.8" y="437" width="48.2" height="15.0" fill="rgb(245,188,45)" rx="2" ry="2" />
+<text  x="542.80" y="447.5" >k8s...</text>
+</g>
+<g >
+<title>runtime.entersyscall_sysmon (1 samples, 1.02%)</title><rect x="335.1" y="357" width="12.0" height="15.0" fill="rgb(236,144,34)" rx="2" ry="2" />
+<text  x="338.10" y="367.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc.(*clientStream).RecvMsg (1 samples, 1.02%)</title><rect x="527.8" y="325" width="12.0" height="15.0" fill="rgb(222,82,19)" rx="2" ry="2" />
+<text  x="530.76" y="335.5" ></text>
+</g>
+<g >
+<title>github.com/google/cadvisor/container/raw.(*rawContainerHandler).getFsStats (1 samples, 1.02%)</title><rect x="130.4" y="485" width="12.0" height="15.0" fill="rgb(234,136,32)" rx="2" ry="2" />
+<text  x="133.41" y="495.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc.(*ClientConn).Invoke (1 samples, 1.02%)</title><rect x="503.7" y="405" width="12.0" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="506.67" y="415.5" ></text>
+</g>
+<g >
+<title>github.com/karrick/godirwalk.ReadDirents (1 samples, 1.02%)</title><rect x="142.4" y="437" width="12.1" height="15.0" fill="rgb(206,7,1)" rx="2" ry="2" />
+<text  x="145.45" y="447.5" ></text>
+</g>
+<g >
+<title>os.(*File).Stat (1 samples, 1.02%)</title><rect x="804.7" y="261" width="12.0" height="15.0" fill="rgb(222,81,19)" rx="2" ry="2" />
+<text  x="807.69" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.futex (1 samples, 1.02%)</title><rect x="1178.0" y="453" width="12.0" height="15.0" fill="rgb(237,150,35)" rx="2" ry="2" />
+<text  x="1180.96" y="463.5" ></text>
+</g>
+<g >
+<title>runtime.unlock2 (1 samples, 1.02%)</title><rect x="840.8" y="373" width="12.1" height="15.0" fill="rgb(244,181,43)" rx="2" ry="2" />
+<text  x="843.82" y="383.5" ></text>
+</g>
+<g >
+<title>github.com/google/cadvisor/container/raw.(*rawContainerWatcher).Start.func1 (1 samples, 1.02%)</title><rect x="10.0" y="549" width="12.0" height="15.0" fill="rgb(221,75,18)" rx="2" ry="2" />
+<text  x="13.00" y="559.5" ></text>
+</g>
+<g >
+<title>runtime.goexit0 (2 samples, 2.04%)</title><rect x="852.9" y="533" width="24.0" height="15.0" fill="rgb(231,122,29)" rx="2" ry="2" />
+<text  x="855.86" y="543.5" >r..</text>
+</g>
+<g >
+<title>google.golang.org/grpc.newClientStreamWithParams.func2 (2 samples, 2.04%)</title><rect x="551.8" y="261" width="24.1" height="15.0" fill="rgb(229,111,26)" rx="2" ry="2" />
+<text  x="554.84" y="271.5" >g..</text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/cadvisor.(*cadvisorClient).ContainerInfoV2 (1 samples, 1.02%)</title><rect x="768.6" y="453" width="12.0" height="15.0" fill="rgb(213,37,8)" rx="2" ry="2" />
+<text  x="771.57" y="463.5" ></text>
+</g>
+<g >
+<title>runtime.mallocgc (1 samples, 1.02%)</title><rect x="323.1" y="485" width="12.0" height="15.0" fill="rgb(241,169,40)" rx="2" ry="2" />
+<text  x="326.06" y="495.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc.(*clientStream).RecvMsg.func1 (1 samples, 1.02%)</title><rect x="780.6" y="341" width="12.1" height="15.0" fill="rgb(244,180,43)" rx="2" ry="2" />
+<text  x="783.61" y="351.5" ></text>
+</g>
+<g >
+<title>k8s.io/klog/v2.Verbose.InfoS (1 samples, 1.02%)</title><rect x="756.5" y="533" width="12.1" height="15.0" fill="rgb(232,128,30)" rx="2" ry="2" />
+<text  x="759.53" y="543.5" ></text>
+</g>
+<g >
+<title>google.golang.org/grpc/internal/transport.(*Stream).RecvCompress (1 samples, 1.02%)</title><rect x="503.7" y="309" width="12.0" height="15.0" fill="rgb(242,174,41)" rx="2" ry="2" />
+<text  x="506.67" y="319.5" ></text>
+</g>
+<g >
+<title>runtime.memclrNoHeapPointers (1 samples, 1.02%)</title><rect x="575.9" y="277" width="12.1" height="15.0" fill="rgb(252,219,52)" rx="2" ry="2" />
+<text  x="578.92" y="287.5" ></text>
+</g>
+<g >
+<title>k8s.io/cri-api/pkg/apis/runtime/v1.(*runtimeServiceClient).ListContainers (1 samples, 1.02%)</title><rect x="479.6" y="325" width="12.0" height="15.0" fill="rgb(243,176,42)" rx="2" ry="2" />
+<text  x="482.59" y="335.5" ></text>
+</g>
+<g >
+<title>github.com/google/cadvisor/utils/sysfs.(*realSysFs).GetHugePagesNr (1 samples, 1.02%)</title><rect x="154.5" y="501" width="12.0" height="15.0" fill="rgb(228,110,26)" rx="2" ry="2" />
+<text  x="157.49" y="511.5" ></text>
+</g>
+<g >
+<title>syscall.RawSyscall6 (1 samples, 1.02%)</title><rect x="142.4" y="373" width="12.1" height="15.0" fill="rgb(241,167,40)" rx="2" ry="2" />
+<text  x="145.45" y="383.5" ></text>
+</g>
+<g >
+<title>runtime.mallocgc (1 samples, 1.02%)</title><rect x="46.1" y="421" width="12.1" height="15.0" fill="rgb(241,169,40)" rx="2" ry="2" />
+<text  x="49.12" y="431.5" ></text>
+</g>
+<g >
+<title>syscall.Getdents (1 samples, 1.02%)</title><rect x="34.1" y="389" width="12.0" height="15.0" fill="rgb(225,95,22)" rx="2" ry="2" />
+<text  x="37.08" y="399.5" ></text>
+</g>
+<g >
+<title>github.com/google/cadvisor/container/common.listDirectories (1 samples, 1.02%)</title><rect x="142.4" y="453" width="12.1" height="15.0" fill="rgb(222,80,19)" rx="2" ry="2" />
+<text  x="145.45" y="463.5" ></text>
+</g>
+<g >
+<title>syscall.Syscall (10 samples, 10.20%)</title><rect x="335.1" y="421" width="120.4" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="338.10" y="431.5" >syscall.Syscall</text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/cri/remote.(*remoteImageService).ListImages (1 samples, 1.02%)</title><rect x="491.6" y="437" width="12.1" height="15.0" fill="rgb(249,204,48)" rx="2" ry="2" />
+<text  x="494.63" y="447.5" ></text>
+</g>
+<g >
+<title>io.ReadFull (10 samples, 10.20%)</title><rect x="178.6" y="517" width="120.4" height="15.0" fill="rgb(212,36,8)" rx="2" ry="2" />
+<text  x="181.57" y="527.5" >io.ReadFull</text>
+</g>
+<g >
+<title>runtime.(*waitq).dequeue (1 samples, 1.02%)</title><rect x="299.0" y="485" width="12.0" height="15.0" fill="rgb(239,160,38)" rx="2" ry="2" />
+<text  x="301.98" y="495.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/container.(*runtimeCache).getPodsWithTimestamp (2 samples, 2.04%)</title><rect x="708.4" y="453" width="24.0" height="15.0" fill="rgb(226,99,23)" rx="2" ry="2" />
+<text  x="711.37" y="463.5" >k..</text>
+</g>
+<g >
+<title>runtime.gopreempt_m (1 samples, 1.02%)</title><rect x="1178.0" y="517" width="12.0" height="15.0" fill="rgb(237,148,35)" rx="2" ry="2" />
+<text  x="1180.96" y="527.5" ></text>
+</g>
+<g >
+<title>runtime.futexwakeup (8 samples, 8.16%)</title><rect x="1081.6" y="437" width="96.4" height="15.0" fill="rgb(219,66,15)" rx="2" ry="2" />
+<text  x="1084.63" y="447.5" >runtime.fut..</text>
+</g>
+<g >
+<title>runtime.futex (1 samples, 1.02%)</title><rect x="756.5" y="277" width="12.1" height="15.0" fill="rgb(237,150,35)" rx="2" ry="2" />
+<text  x="759.53" y="287.5" ></text>
+</g>
+<g >
+<title>runtime/internal/syscall.Syscall6 (1 samples, 1.02%)</title><rect x="10.0" y="437" width="12.0" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="13.00" y="447.5" ></text>
+</g>
+<g >
+<title>runtime.futex (2 samples, 2.04%)</title><rect x="551.8" y="37" width="24.1" height="15.0" fill="rgb(237,150,35)" rx="2" ry="2" />
+<text  x="554.84" y="47.5" >r..</text>
+</g>
+<g >
+<title>google.golang.org/grpc.(*ClientConn).Invoke (4 samples, 4.08%)</title><rect x="539.8" y="373" width="48.2" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="542.80" y="383.5" >goog..</text>
+</g>
+<g >
+<title>os.openFileNolog (2 samples, 2.04%)</title><rect x="94.3" y="405" width="24.1" height="15.0" fill="rgb(221,74,17)" rx="2" ry="2" />
+<text  x="97.29" y="415.5" >o..</text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet.(*Kubelet).HandlePodCleanups (10 samples, 10.20%)</title><rect x="612.0" y="501" width="120.4" height="15.0" fill="rgb(240,165,39)" rx="2" ry="2" />
+<text  x="615.04" y="511.5" >k8s.io/kubernet..</text>
+</g>
+<g >
+<title>runtime.systemstack (1 samples, 1.02%)</title><rect x="46.1" y="325" width="12.1" height="15.0" fill="rgb(206,6,1)" rx="2" ry="2" />
+<text  x="49.12" y="335.5" ></text>
+</g>
+<g >
+<title>k8s.io/kubernetes/pkg/kubelet/cadvisor.(*cadvisorClient).ContainerInfoV2 (2 samples, 2.04%)</title><rect x="792.7" y="421" width="24.0" height="15.0" fill="rgb(213,37,8)" rx="2" ry="2" />
+<text  x="795.65" y="431.5" >k..</text>
+</g>
+</g>
+</svg>
